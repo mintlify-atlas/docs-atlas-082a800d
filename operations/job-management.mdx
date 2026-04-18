@@ -1,0 +1,185 @@
+---
+title: "Manage mirror jobs with tunasynctl: start, stop, reload"
+description: "Start, stop, disable, and restart mirror jobs. Reload worker configurations, flush disabled jobs, and manage workers using tunasynctl commands."
+---
+
+`tunasynctl` is the command-line control tool for tunasync. It communicates with the manager over HTTP(S) and lets you inspect job status, trigger syncs, pause or disable mirrors, reload worker configuration, and remove stale workers or jobs. All commands read connection settings from `~/.config/tunasync/ctl.conf` (which overrides `/etc/tunasync/ctl.conf`):
+
+```toml
+manager_addr = "127.0.0.1"
+manager_port = 12345
+ca_cert      = ""
+```
+
+Alternatively, pass `-p <port>` and `-m <addr>` on the command line to override these values.
+
+## Listing jobs
+
+### All workers
+
+```shell
+tunasynctl list --all
+```
+
+### A specific worker
+
+```shell
+tunasynctl list -w <worker-id>
+```
+
+### Filtering by status
+
+Use `--status` with a comma-separated list of status values to narrow the output:
+
+```shell
+tunasynctl list --all --status syncing,failed
+```
+
+### Custom output format
+
+The `--format` flag accepts a Go template string. The template receives a slice of mirror status objects:
+
+```shell
+tunasynctl list --all --format "{{range .}}{{.Name}}\t{{.Status}}\n{{end}}"
+```
+
+## Starting a job
+
+Trigger an immediate sync for a mirror. This is equivalent to scheduling a sync run right now:
+
+```shell
+tunasynctl start -w <worker-id> <mirror>
+```
+
+Use `--force` to start even if the job is currently marked as disabled:
+
+```shell
+tunasynctl start --force -w <worker-id> <mirror>
+```
+
+## Stopping a job
+
+Stop a running sync and set the mirror's status to `Paused`. The scheduler will not start the mirror again until it is manually restarted or the worker is reloaded:
+
+```shell
+tunasynctl stop -w <worker-id> <mirror>
+```
+
+## Disabling a job
+
+Disable stops the sync goroutine entirely and sets the status to `Disabled`. Unlike `stop`, the mirror is removed from the worker's active job list and will not run automatically:
+
+```shell
+tunasynctl disable -w <worker-id> <mirror>
+```
+
+## Restarting a job
+
+Restart stops any running sync and immediately schedules a fresh run:
+
+```shell
+tunasynctl restart -w <worker-id> <mirror>
+```
+
+## Reloading worker configuration
+
+Send a `SIGHUP` to the worker via the manager API. The worker re-reads its configuration file and applies changes to the mirror list without interrupting jobs that are currently syncing:
+
+```shell
+tunasynctl reload -w <worker-id>
+```
+
+## Removing a mirror
+
+Removing a mirror cleanly requires a specific sequence to avoid leaving orphaned records in the manager database.
+
+<Steps>
+  <Step title="Remove the mirror directory (optional)">
+    Delete the synced data from disk if you no longer need it.
+  </Step>
+  <Step title="Delete the mirror entry from worker.conf">
+    Remove the corresponding `[[mirrors]]` block from the worker's configuration file.
+  </Step>
+  <Step title="Reload the worker">
+    ```shell
+    tunasynctl reload -w <worker-id>
+    ```
+    After reload the mirror is no longer scheduled, but its record may still exist in the manager database.
+  </Step>
+  <Step title="Disable the mirror">
+    ```shell
+    tunasynctl disable -w <worker-id> <mirror>
+    ```
+    This sets the status to `Disabled` in the manager database.
+  </Step>
+  <Step title="Flush disabled jobs">
+    ```shell
+    tunasynctl flush
+    ```
+    This removes all `Disabled` records from the manager database.
+  </Step>
+  <Step title="Remove log files (optional)">
+    Delete any remaining log files from the worker's log directory for the mirror.
+  </Step>
+</Steps>
+
+**Example** — removing the `elvish` mirror from `test_worker`:
+
+```shell
+tunasynctl reload   -w test_worker
+tunasynctl disable  -w test_worker elvish
+tunasynctl flush
+```
+
+## Flushing disabled jobs
+
+Remove all jobs in `Disabled` state from the manager database across all workers:
+
+```shell
+tunasynctl flush
+```
+
+<Warning>
+`flush` is irreversible. Any mirror that has been disabled but that you intend to re-enable should be re-enabled before running this command.
+</Warning>
+
+## Setting mirror size
+
+Report the disk usage of a mirror to the manager. This value is displayed in `tunasynctl list` output and can be set manually or by a cron script:
+
+```shell
+tunasynctl set-size -w <worker-id> <mirror> <size>
+```
+
+Example:
+
+```shell
+tunasynctl set-size -w mirror_worker debian 1.2T
+```
+
+<Tip>
+For rsync-based mirrors, the transferred size can be parsed directly from the rsync log using `size_pattern` in `worker.conf`, avoiding the need to run `du -s` on large trees.
+</Tip>
+
+## Listing workers
+
+Show all workers registered with the manager:
+
+```shell
+tunasynctl workers
+```
+
+## Removing a worker
+
+Remove a worker record from the manager database. This does not stop the worker process—stop the systemd service first:
+
+```shell
+tunasynctl rm-worker -w <worker-id>
+```
+
+Example:
+
+```shell
+systemctl stop tunasync-worker
+tunasynctl rm-worker -w test_worker
+```

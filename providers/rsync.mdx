@@ -1,0 +1,197 @@
+---
+title: "rsync provider: sync mirrors from rsync:// upstreams"
+description: "Sync mirrors using rsync. Configure upstream URL, exclude files, IPv4/IPv6, authentication, timeout, and custom rsync options in worker.conf."
+---
+
+The rsync provider runs the system `rsync` binary to sync files from an upstream `rsync://` URL into the local mirror directory. It is the simplest and most common provider in tunasync, suitable for any upstream that exposes an rsync endpoint.
+
+## Minimal configuration
+
+```toml
+[[mirrors]]
+name = "alpine"
+provider = "rsync"
+upstream = "rsync://rsync.alpinelinux.org/alpine/"
+```
+
+<Warning>
+The upstream URL **must** end with a trailing slash (`/`). tunasync will refuse to start the job if the slash is missing.
+</Warning>
+
+## Default rsync options
+
+Unless you use `rsync_override` or `rsync_override_only`, tunasync always passes the following base options to rsync:
+
+```shell
+rsync -aHvh --no-o --no-g --stats \
+  --filter "risk .~tmp~/" --exclude ".~tmp~/" \
+  --delete --delete-after --delay-updates \
+  --safe-links \
+  --timeout=120
+```
+
+Additional flags such as `-4`, `-6`, `--exclude-from`, and any entries in `rsync_options` are appended after these defaults.
+
+## Configuration fields
+
+<AccordionGroup>
+  <Accordion title="upstream">
+    **Required.** The rsync source URL. Must use the `rsync://` scheme and end with a trailing slash.
+
+    ```toml
+    upstream = "rsync://rsync.kernel.org/pub/linux/kernel/"
+    ```
+  </Accordion>
+
+  <Accordion title="username / password">
+    Credentials for authenticated rsync upstreams. tunasync sets `USER` and `RSYNC_PASSWORD` as environment variables before invoking rsync — the password is never passed on the command line.
+
+    ```toml
+    username = "mirror"
+    password = "secret"
+    ```
+  </Accordion>
+
+  <Accordion title="exclude_file">
+    Path to a local file passed to rsync as `--exclude-from`. Each line in the file is treated as an exclude pattern.
+
+    ```toml
+    exclude_file = "/etc/excludes/qt.txt"
+    ```
+  </Accordion>
+
+  <Accordion title="use_ipv4 / use_ipv6">
+    Force rsync to use a specific IP version by appending `-4` or `-6`. Only one may be set at a time; `use_ipv4` takes precedence if both are set.
+
+    ```toml
+    use_ipv4 = true
+    ```
+  </Accordion>
+
+  <Accordion title="rsync_no_timeout">
+    Set to `true` to omit the `--timeout` flag entirely. Useful when the upstream is slow and you do not want rsync to abort idle connections.
+
+    ```toml
+    rsync_no_timeout = true
+    ```
+  </Accordion>
+
+  <Accordion title="rsync_timeout">
+    Override the default 120-second rsync I/O timeout. Ignored when `rsync_no_timeout = true`.
+
+    ```toml
+    rsync_timeout = 300
+    ```
+  </Accordion>
+
+  <Accordion title="rsync_options">
+    Additional flags appended to the default option set. Use this for options such as `--delete-excluded` or custom `--exclude` patterns that should complement the defaults.
+
+    ```toml
+    rsync_options = ["--delete-excluded"]
+    ```
+  </Accordion>
+
+  <Accordion title="rsync_override">
+    Replaces the entire default option set with the provided list. All default flags (`-aHvh`, `--delete`, etc.) are dropped; only the options listed here are used.
+
+    ```toml
+    rsync_override = ["-avz", "--delete"]
+    ```
+  </Accordion>
+
+  <Accordion title="rsync_override_only">
+    When `true`, tunasync uses the options in `rsync_override` exclusively and does not append `--timeout`, `-4`/`-6`, or `--exclude-from`. Requires `rsync_override` to be set.
+
+    ```toml
+    rsync_override_only = true
+    rsync_override = ["-avz", "--delete"]
+    ```
+  </Accordion>
+
+  <Accordion title="rsync_success_exit_codes">
+    A list of rsync exit codes that should be treated as success. Merged with any globally configured success exit codes.
+
+    ```toml
+    rsync_success_exit_codes = [23, 24]
+    ```
+  </Accordion>
+
+  <Accordion title="memory_limit">
+    Cap the memory this job's process may use (via cgroup). Accepts human-readable sizes such as `"256M"` or `"1G"`.
+
+    ```toml
+    memory_limit = "256M"
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Examples from workers.conf
+
+<CodeGroup>
+
+```toml alpine (minimal)
+[[mirrors]]
+name = "alpine"
+provider = "rsync"
+upstream = "rsync://rsync.alpinelinux.org/alpine/"
+memory_limit = "256M"
+```
+
+```toml apache (IPv4 + extra options)
+[[mirrors]]
+name = "apache"
+provider = "rsync"
+upstream = "rsync://rsync.apache.org/apache-dist/"
+use_ipv4 = true
+rsync_options = ["--delete-excluded"]
+memory_limit = "256M"
+```
+
+```toml kernel (extra options)
+[[mirrors]]
+name = "kernel"
+provider = "rsync"
+upstream = "rsync://rsync.kernel.org/pub/linux/kernel/"
+rsync_options = ["--delete-excluded"]
+memory_limit = "256M"
+```
+
+```toml kodi (IPv6)
+[[mirrors]]
+name = "kodi"
+provider = "rsync"
+upstream = "rsync://mirror.yandex.ru/mirrors/xbmc/"
+rsync_options = ["--delete-excluded"]
+use_ipv6 = true
+memory_limit = "256M"
+```
+
+```toml bioconductor (exclude file + SSH rsh)
+[[mirrors]]
+name = "bioconductor"
+provider = "rsync"
+upstream = "master.bioconductor.org:./"
+rsync_options = ["--rsh=ssh -i /root/id_rsa -o PasswordAuthentication=no -l sync"]
+exclude_file = "/etc/excludes/bioconductor.txt"
+memory_limit = "256M"
+```
+
+```toml solus (multiple excludes)
+[[mirrors]]
+name = "solus"
+provider = "rsync"
+upstream = "rsync://mirrors.rit.edu/solus/"
+rsync_options = ["--exclude", "/shannon", "--exclude", "/unstable"]
+memory_limit = "256M"
+```
+
+</CodeGroup>
+
+<Tip>
+Rsync exit codes **23** (partial transfer due to error) and **24** (partial transfer due to vanished source files) are commonly non-fatal for large mirrors. Add them to `rsync_success_exit_codes` if your upstream regularly has files disappear during a sync run:
+
+```toml
+rsync_success_exit_codes = [23, 24]
+```
+</Tip>

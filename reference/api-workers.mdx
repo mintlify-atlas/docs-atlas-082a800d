@@ -1,0 +1,118 @@
+---
+title: "Manager API: GET, POST, and DELETE /workers endpoints"
+description: "GET /workers lists all workers. POST /workers registers a new worker. DELETE /workers/:id removes a worker. Includes request and response schemas."
+---
+
+The workers endpoints let you inspect the set of tunasync worker processes currently known to the manager and manage their registration. Workers call `POST /workers` automatically on startup; operators typically use `GET /workers` to inspect state and `DELETE /workers/:id` (via `tunasynctl rm-worker`) to clean up stale entries.
+
+---
+
+## GET /workers
+
+List all workers that are currently registered with the manager. The `token` field is always redacted in the response.
+
+**Response** — `200 OK` with an array of `WorkerStatus` objects.
+
+<ResponseField name="id" type="string" required>
+  Unique identifier for the worker. Set by the worker's configuration.
+</ResponseField>
+
+<ResponseField name="url" type="string" required>
+  The HTTP URL at which the manager can reach this worker to forward commands.
+</ResponseField>
+
+<ResponseField name="token" type="string">
+  Session token. Always returned as `"REDACTED"` by the manager; the original value is never exposed.
+</ResponseField>
+
+<ResponseField name="last_online" type="string">
+  ISO-8601 timestamp of the last time the manager recorded activity from this worker.
+</ResponseField>
+
+<ResponseField name="last_register" type="string">
+  ISO-8601 timestamp of the most recent worker registration event.
+</ResponseField>
+
+```bash
+curl http://127.0.0.1:14242/workers
+```
+
+Example response:
+
+```json
+[
+  {
+    "id": "worker-01",
+    "url": "http://127.0.0.1:16010",
+    "token": "REDACTED",
+    "last_online": "2024-05-01T12:34:56Z",
+    "last_register": "2024-05-01T12:00:00Z"
+  }
+]
+```
+
+---
+
+## POST /workers
+
+Register a worker with the manager. This endpoint is called automatically by each tunasync worker process on startup. The manager sets `last_online` and `last_register` to the current server time regardless of the values sent in the request body.
+
+**Request body** — `WorkerStatus` JSON object.
+
+<ParamField body="id" type="string" required>
+  Unique worker ID. Must be unique across all registered workers.
+</ParamField>
+
+<ParamField body="url" type="string" required>
+  The URL the manager should use to reach this worker when forwarding commands.
+</ParamField>
+
+<ParamField body="token" type="string">
+  An optional session token for the worker. Stored by the manager but never returned in list responses.
+</ParamField>
+
+**Response** — `200 OK` with the stored `WorkerStatus` object, including server-set timestamps.
+
+```bash
+curl -X POST http://127.0.0.1:14242/workers \
+  -H "Content-Type: application/json" \
+  -d '{"id": "worker-01", "url": "http://127.0.0.1:16010", "token": "secret"}'
+```
+
+Example response:
+
+```json
+{
+  "id": "worker-01",
+  "url": "http://127.0.0.1:16010",
+  "token": "secret",
+  "last_online": "2024-05-01T12:00:00Z",
+  "last_register": "2024-05-01T12:00:00Z"
+}
+```
+
+---
+
+## DELETE /workers/:id
+
+Remove a registered worker by its ID. All mirror job records associated with the worker remain in the database; only the worker entry is deleted.
+
+**Path parameter**
+
+<ParamField path="id" type="string" required>
+  The ID of the worker to remove. Must match an existing worker ID.
+</ParamField>
+
+**Response** — `200 OK`:
+
+```json
+{ "message": "deleted" }
+```
+
+```bash
+curl -X DELETE http://127.0.0.1:14242/workers/worker-01
+```
+
+<Tip>
+  Use `tunasynctl rm-worker -w worker-01` to perform this operation from the command line.
+</Tip>

@@ -1,80 +1,181 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: "Quickstart: deploy your first tunasync mirror setup"
+description: "Deploy a tunasync manager and worker, configure your first rsync mirror job, and control it with tunasynctl — up and running in under 10 minutes."
 ---
 
-## Get started in three steps
+This guide walks you through the minimum configuration needed to run a working tunasync deployment: one manager, one worker, and a single mirror job syncing the [elvish](https://elv.sh) project via rsync. By the end you will have a running system you can query with `tunasynctl` and extend with additional mirrors.
 
-Get your documentation site running locally and make your first customization.
+<Steps>
+  <Step title="Download or build tunasync">
+    The simplest way to get started is to download a pre-built binary from the [GitHub releases page](https://github.com/tuna/tunasync/releases/latest). Releases include tarballs for Linux x86_64 and ARM64.
 
-### Step 1: Set up your local environment
+    If you prefer to build from source, you need Go 1.21 or later. Clone the repository and run:
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+    ```shell
+    make all
+    ```
 
-### Step 2: Deploy your changes
+    To build for a non-native architecture:
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+    ```shell
+    make ARCH=linux-arm64 all
+    ```
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+    Binaries are placed in `build-linux-amd64/` (or the equivalent directory for your target architecture). The build produces three binaries: `tunasync`, `tunasynctl`, and supporting files.
+  </Step>
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+  <Step title="Create the manager config">
+    The manager is a stateful HTTP server. Create the directory and config file:
 
-### Step 3: Go live
+    ```shell
+    mkdir ~/tunasync_demo
+    mkdir -p /tmp/tunasync
+    ```
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+    Create `~/tunasync_demo/manager.conf`:
+
+    ```toml
+    debug = false
+
+    [server]
+    addr = "127.0.0.1"
+    port = 12345
+    ssl_cert = ""
+    ssl_key = ""
+
+    [files]
+    db_type = "bolt"
+    db_file = "/tmp/tunasync/manager.db"
+    ca_cert = ""
+    ```
+
+    The manager stores all job state in the BoltDB file at `db_file`. The `ca_cert` field is only needed when workers connect over HTTPS. In this local setup both are left empty.
+
+    <Note>
+    In addition to `bolt`, tunasync supports `badger`, `leveldb`, and `redis` database backends. For Redis, set `db_type = "redis"` and set `db_file` to the connection URL: `redis://user:password@host:port/db_number`.
+    </Note>
+  </Step>
+
+  <Step title="Create the worker config">
+    The worker runs on the sync host and executes mirror jobs. Create `~/tunasync_demo/worker.conf`:
+
+    ```toml
+    [global]
+    name = "test_worker"
+    log_dir = "/tmp/tunasync/log/tunasync/{{.Name}}"
+    mirror_dir = "/tmp/tunasync"
+    concurrent = 10
+    interval = 120
+
+    [manager]
+    api_base = "http://localhost:12345"
+    ca_cert = ""
+
+    [cgroup]
+    enable = false
+    base_path = "/sys/fs/cgroup"
+    group = "tunasync"
+
+    [server]
+    hostname = "localhost"
+    listen_addr = "127.0.0.1"
+    listen_port = 6000
+    ssl_cert = ""
+    ssl_key = ""
+
+    [[mirrors]]
+    name = "elvish"
+    provider = "rsync"
+    upstream = "rsync://rsync.elv.sh/elvish/"
+    use_ipv6 = false
+    ```
+
+    Key fields to understand:
+
+    - `global.name` — the unique worker ID registered with the manager
+    - `global.mirror_dir` — base directory where mirror data is written
+    - `global.interval` — default sync interval in minutes (overridable per mirror)
+    - `global.concurrent` — maximum number of jobs running at the same time
+    - `manager.api_base` — the HTTP URL of the manager; must match the manager's `addr` and `port`
+    - `server.listen_port` — the port this worker listens on for commands forwarded by the manager
+
+    <Note>
+    The `{{.Name}}` template in `log_dir` is expanded to each mirror's name at runtime, creating a separate log file per mirror.
+    </Note>
+  </Step>
+
+  <Step title="Start the manager">
+    Run the manager in a terminal or as a background process:
+
+    ```shell
+    tunasync manager --config ~/tunasync_demo/manager.conf
+    ```
+
+    The manager listens on `127.0.0.1:12345` and is ready to accept worker registrations. You can add `--verbose` for more log output or `--debug` to enable the Gin HTTP request log.
+  </Step>
+
+  <Step title="Start the worker">
+    In a second terminal, start the worker:
+
+    ```shell
+    tunasync worker --config ~/tunasync_demo/worker.conf
+    ```
+
+    The worker registers itself with the manager at startup, then immediately begins scheduling the mirrors defined in its config. The elvish mirror will start syncing after a short delay.
+
+    <Tip>
+    Send `SIGHUP` to a running worker to reload its mirror configuration without restarting or interrupting any in-progress sync jobs:
+
+    ```shell
+    kill -HUP $(pidof tunasync)
+    ```
+
+    This lets you add or modify mirrors at runtime.
+    </Tip>
+  </Step>
+
+  <Step title="Check status with tunasynctl">
+    Query the manager for the current status of all jobs:
+
+    ```shell
+    tunasynctl list -p 12345 --all
+    ```
+
+    You will see a table showing each mirror, its worker, current state (`none`, `syncing`, `success`, etc.), last update time, and upstream URL.
+
+    To avoid specifying `-p 12345` every time, create a `tunasynctl` config file at `~/.config/tunasync/ctl.conf` (or `/etc/tunasync/ctl.conf` for system-wide defaults):
+
+    ```toml
+    manager_addr = "127.0.0.1"
+    manager_port = 12345
+    ca_cert = ""
+    ```
+
+    With that in place you can run `tunasynctl list --all` without the port flag. The per-user file at `~/.config/tunasync/ctl.conf` takes precedence over the system file.
+  </Step>
+</Steps>
+
+## HTTP vs HTTPS
+
+<Note>
+When the manager and all workers run on the same host (as in this guide), plain HTTP is sufficient and simpler to configure. Leave `ssl_cert` and `ssl_key` empty in both the manager and worker configs, and use `http://` as the scheme in `api_base`.
+
+For production deployments where the worker communicates with the manager over a network, configure TLS: set `ssl_cert` and `ssl_key` in the manager config, set `ca_cert` in the worker config to the CA certificate, and change `api_base` to `https://`.
+</Note>
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Architecture" icon="diagram-project" href="/architecture">
+    Understand how the manager, worker, and tunasynctl communicate.
+  </Card>
+  <Card title="Providers" icon="arrows-rotate" href="/providers/rsync">
+    Add two-stage rsync or command-based mirrors to your worker config.
+  </Card>
+  <Card title="Configuration reference" icon="sliders" href="/configuration/manager">
+    See all available config fields for the manager, worker, and mirrors.
+  </Card>
+  <Card title="Operations" icon="terminal" href="/operations/job-management">
+    Start, stop, disable, and restart jobs with tunasynctl.
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

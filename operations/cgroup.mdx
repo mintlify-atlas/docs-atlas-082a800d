@@ -1,0 +1,156 @@
+---
+title: "Limit mirror job memory usage with cgroup v1 and v2"
+description: "Configure cgroup v1 or v2 to limit memory usage per mirror job in tunasync. Covers implicit and manual group modes, systemd Delegate, and cgcreate."
+---
+
+tunasync can integrate with the Linux cgroup subsystem to track and constrain the processes started by each mirror job. When cgroup support is enabled, every non-Docker sync job runs in its own sub-cgroup, and the `memory_limit` setting in `worker.conf` is enforced by the kernel rather than by application-level logic. Without cgroup, `memory_limit` has no effect for non-Docker jobs.
+
+## Why use cgroup
+
+- **Memory limiting per job.** Setting `memory_limit = "256M"` on a mirror guarantees that its sync process tree cannot consume more than 256 MiB of RAM. The kernel OOM killer enforces this limit.
+- **Process tracking.** All child processes (rsync, scripts, etc.) are grouped under a single cgroup, making cleanup on job termination reliable.
+- **Isolation.** Each mirror job gets its own sub-cgroup, so limits and accounting are per-mirror rather than global.
+
+<Note>
+cgroup integration is skipped entirely for mirrors that use `docker_image`. Docker enforces resource limits via `docker run --memory` instead. See [Running mirror jobs in Docker](/operations/docker).
+</Note>
+
+## cgroup versions
+
+Linux supports two cgroup hierarchies, and tunasync detects which one is active at startup:
+
+| Version | Hierarchy | Typical systems |
+|---------|-----------|-----------------|
+| v1 (legacy/hybrid) | Multiple controller trees under `/sys/fs/cgroup/<controller>/` | Older distros, hybrid mode |
+| v2 (unified) | Single tree under `/sys/fs/cgroup/` | systemd ≥ 243 default |
+
+The recommended configuration differs between the two because systemd behaves differently in each case.
+
+## Two modes of group discovery
+
+tunasync offers two strategies for choosing which cgroup it will create per-job sub-groups in.
+
+### Implicit mode (recommended for v2)
+
+When `group` is empty or not set, tunasync uses the cgroup it is currently running in (as assigned by systemd) and creates sub-groups for each job inside that cgroup. On startup it also creates a `__worker` sub-group and moves itself into it, satisfying the cgroup v2 requirement that processes only reside in leaf nodes.
+
+This mode pairs naturally with `Delegate=yes` in the systemd service, which grants the worker process full write access to its own cgroup subtree without requiring root.
+
+### Manual mode
+
+When `group` is set to a non-empty string, tunasync looks for that cgroup path and creates per-job sub-groups within it. You are responsible for creating the parent cgroup and granting write access to the tunasync user before starting the service.
+
+<Warning>
+Manual mode with cgroup v2 is not recommended for non-root users. The v2 design requires that the process moving tasks between groups also has write permission on the common ancestor. This is typically not the case for non-root accounts without `Delegate=yes`.
+</Warning>
+
+## Setting up cgroup v1
+
+On systems using the legacy or hybrid hierarchy, use `cgcreate` and `cgdelete` from the `libcgroup-tools` package.
+
+**`/etc/systemd/system/tunasync-worker.service`:**
+
+```ini
+[Unit]
+Description = TUNA mirrors sync worker
+After=network.target
+
+[Service]
+Type=simple
+User=tunasync
+PermissionsStartOnly=true
+ExecStartPre=/usr/bin/cgcreate -t tunasync -a tunasync -g memory:tunasync
+ExecStart=/home/bin/tunasync worker -c /etc/tunasync/worker.conf --with-systemd
+ExecReload=/bin/kill -SIGHUP $MAINPID
+ExecStopPost=/usr/bin/cgdelete memory:tunasync
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**`/etc/tunasync/worker.conf`:**
+
+```toml
+[cgroup]
+enable = true
+group  = "tunasync"
+```
+
+`cgcreate -g memory:tunasync` creates `/sys/fs/cgroup/memory/tunasync` and sets ownership to the `tunasync` user. tunasync then creates a sub-cgroup for each mirror job (e.g. `/sys/fs/cgroup/memory/tunasync/debian`). `cgdelete` cleans up on service stop.
+
+### Manual group creation (v1 alternative)
+
+You can also create the hierarchy by hand, which gives finer control over which controller subsystems are used:
+
+```bash
+sudo mkdir -p /sys/fs/cgroup/cpu/test/tunasync
+sudo mkdir -p /sys/fs/cgroup/memory/test/tunasync
+sudo chown -R tunasync:tunasync /sys/fs/cgroup/cpu/test/tunasync
+sudo chown -R tunasync:tunasync /sys/fs/cgroup/memory/test/tunasync
+```
+
+Then set `group = "test/tunasync"` (or `"/test/tunasync"`) in `worker.conf`. tunasync will auto-detect that both `cpu` and `memory` controllers are enabled and create sub-cgroups for each job under both.
+
+## Setting up cgroup v2
+
+On systems with the unified hierarchy (systemd ≥ 243), use `Delegate=yes` and leave `group` empty to use implicit mode.
+
+**`/etc/systemd/system/tunasync-worker.service`:**
+
+```ini
+[Unit]
+Description = TUNA mirrors sync worker
+After=network.target
+
+[Service]
+Type=simple
+User=tunasync
+ExecStart=/home/bin/tunasync worker -c /etc/tunasync/worker.conf --with-systemd
+ExecReload=/bin/kill -SIGHUP $MAINPID
+Delegate=yes
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**`/etc/tunasync/worker.conf`:**
+
+```toml
+[cgroup]
+enable = true
+```
+
+`Delegate=yes` instructs systemd to pass ownership of the service's cgroup subtree to the running process, allowing tunasync to create and manage child cgroups as a non-root user.
+
+## Configuration reference
+
+All cgroup options go in the `[cgroup]` section of `worker.conf`:
+
+```toml
+[cgroup]
+enable    = true
+base_path = "/sys/fs/cgroup"
+group     = "tunasync"
+subsystem = "memory"
+```
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `enable` | bool | Enable cgroup integration. When `false`, all other options and `memory_limit` (for non-Docker jobs) are ignored. |
+| `group` | string | Cgroup path for manual mode. When empty or omitted, implicit mode is used. |
+| `base_path` | string | Ignored. The cgroup filesystem must be mounted at its default path (`/sys/fs/cgroup`). |
+| `subsystem` | string | Ignored. Controller discovery is now automatic. |
+
+## Applying memory limits to a mirror
+
+Set `memory_limit` on any `[[mirrors]]` entry. The value uses human-readable suffixes (`K`, `M`, `G`, `T`):
+
+```toml
+[[mirrors]]
+name         = "alpine"
+provider     = "rsync"
+upstream     = "rsync://rsync.alpinelinux.org/alpine/"
+memory_limit = "256M"
+```
+
+When the job runs, tunasync creates a sub-cgroup with `memory.max` (v2) or `memory.limit_in_bytes` (v1) set to 256 MiB. Any process in that sub-cgroup that exceeds the limit is subject to the kernel OOM killer.

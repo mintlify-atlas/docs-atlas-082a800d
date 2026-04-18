@@ -1,0 +1,238 @@
+---
+title: "tunasync worker.conf: complete configuration reference"
+description: "Complete reference for tunasync worker.conf. Configure global settings, manager connection, server, cgroup, ZFS, Btrfs, Docker, and mirror includes."
+---
+
+A tunasync worker is the process that runs mirror sync jobs. It reads a TOML configuration file (conventionally `worker.conf`) that defines global defaults, how to reach the manager, the worker's own HTTP server, optional resource controls, and the list of mirrors to sync. Mirrors can be defined inline or loaded from external files via `[include]`.
+
+## Example configuration
+
+```toml worker.conf
+[global]
+name       = "mirror_worker"
+log_dir    = "/srv/tunasync/log/tunasync/{{.Name}}"
+mirror_dir = "/srv/tunasync"
+concurrent = 10
+interval   = 120
+
+[manager]
+api_base = "http://localhost:14242"
+ca_cert  = ""
+
+[server]
+hostname    = "localhost"
+listen_addr = "127.0.0.1"
+listen_port = 6000
+ssl_cert    = ""
+ssl_key     = ""
+
+[cgroup]
+enable    = false
+base_path = "/sys/fs/cgroup"
+group     = "tunasync"
+subsystem = "memory"
+
+[zfs]
+enable = false
+zpool  = ""
+
+[btrfs_snapshot]
+enable        = false
+snapshot_path = ""
+
+[docker]
+enable  = false
+volumes = []
+options = []
+
+[include]
+include_mirrors = ""
+
+[[mirrors]]
+name     = "alpine"
+provider = "rsync"
+upstream = "rsync://rsync.alpinelinux.org/alpine/"
+```
+
+## [global] section
+
+Global defaults apply to every mirror job unless overridden in a `[[mirrors]]` block.
+
+<ParamField path="global.name" type="string" required>
+  Unique identifier for this worker, reported to the manager and used in log paths. Must not contain spaces.
+</ParamField>
+
+<ParamField path="global.log_dir" type="string">
+  Directory where per-mirror log files are written. Supports the `{{.Name}}` Go template variable, which expands to the mirror's `name` field. Example: `/srv/tunasync/log/tunasync/{{.Name}}`.
+</ParamField>
+
+<ParamField path="global.mirror_dir" type="string">
+  Root directory under which all mirror data is stored. Individual mirrors may override this with `mirror_dir`.
+</ParamField>
+
+<ParamField path="global.concurrent" type="number" default="0">
+  Maximum number of mirror jobs that may run in parallel.
+</ParamField>
+
+<ParamField path="global.interval" type="number" default="0">
+  Default sync interval in minutes for all mirrors. Individual mirrors can override this value.
+</ParamField>
+
+<ParamField path="global.retry" type="number" default="0">
+  Number of times to retry a failed sync before marking the job as failed.
+</ParamField>
+
+<ParamField path="global.timeout" type="number" default="0">
+  Maximum wall-clock time in seconds for a single sync run. Zero means no timeout.
+</ParamField>
+
+<ParamField path="global.rsync_options" type="string[]">
+  Extra rsync flags appended to every rsync invocation, before mirror-specific `rsync_options`. Example: `["--bwlimit=10000"]`.
+</ParamField>
+
+<ParamField path="global.exec_on_success" type="string[]">
+  Commands to run after a successful sync. Overridden entirely by a mirror's own `exec_on_success`.
+</ParamField>
+
+<ParamField path="global.exec_on_failure" type="string[]">
+  Commands to run after a failed sync. Overridden entirely by a mirror's own `exec_on_failure`.
+</ParamField>
+
+<ParamField path="global.dangerous_global_success_exit_codes" type="number[]">
+  Additional process exit codes that are treated as success for all providers. Merged with mirror-level `success_exit_codes`.
+</ParamField>
+
+<ParamField path="global.dangerous_global_rsync_success_exit_codes" type="number[]">
+  Additional rsync exit codes treated as success, applied to all `rsync` and `two-stage-rsync` mirrors. Merged with mirror-level `rsync_success_exit_codes`.
+
+  <Warning>
+    Allowing extra exit codes can hide real errors. Only add exit codes you fully understand, such as `23` (partial transfer) or `24` (vanished source files).
+  </Warning>
+</ParamField>
+
+## [manager] section
+
+<ParamField path="manager.api_base" type="string">
+  Base URL of the manager API, e.g. `http://localhost:14242`. Ignored when `api_base_list` is set.
+</ParamField>
+
+<ParamField path="manager.api_base_list" type="string[]">
+  List of manager API base URLs. When provided, this overrides `api_base`. The worker will try each URL in order.
+
+  ```toml
+  [manager]
+  api_base_list = [
+    "http://manager1:14242",
+    "http://manager2:14242",
+  ]
+  ```
+</ParamField>
+
+<ParamField path="manager.ca_cert" type="string">
+  Path to a PEM-encoded CA certificate used to verify the manager's TLS certificate when `api_base` starts with `https://`.
+</ParamField>
+
+## [server] section
+
+Each worker exposes a small HTTP server so the manager can push commands (start, stop, reload).
+
+<ParamField path="server.hostname" type="string">
+  Hostname advertised to the manager. The manager uses this to call back into the worker.
+</ParamField>
+
+<ParamField path="server.listen_addr" type="string">
+  IP address the worker HTTP server binds to.
+</ParamField>
+
+<ParamField path="server.listen_port" type="number">
+  TCP port the worker HTTP server listens on.
+</ParamField>
+
+<ParamField path="server.ssl_cert" type="string">
+  Path to the TLS certificate for the worker's HTTP server. Required for HTTPS between manager and worker.
+</ParamField>
+
+<ParamField path="server.ssl_key" type="string">
+  Path to the TLS private key for the worker's HTTP server.
+</ParamField>
+
+## [cgroup] section
+
+Cgroup support limits memory and CPU usage of sync processes.
+
+<ParamField path="cgroup.enable" type="boolean" default="false">
+  Enable cgroup resource control for sync jobs.
+</ParamField>
+
+<ParamField path="cgroup.base_path" type="string" default="/sys/fs/cgroup">
+  Mount point of the cgroup filesystem.
+</ParamField>
+
+<ParamField path="cgroup.group" type="string" default="tunasync">
+  Name of the cgroup to create under `base_path`.
+</ParamField>
+
+<ParamField path="cgroup.subsystem" type="string">
+  Cgroup subsystem to use, e.g. `memory`. Relevant for cgroup v1 only.
+</ParamField>
+
+<Note>
+  Per-mirror memory limits are set with the `memory_limit` field in each `[[mirrors]]` block. The cgroup section only enables the feature and sets the mount path.
+</Note>
+
+## [zfs] section
+
+<ParamField path="zfs.enable" type="boolean" default="false">
+  Enable ZFS snapshot support. When enabled, the worker creates a ZFS snapshot after each successful sync.
+</ParamField>
+
+<ParamField path="zfs.zpool" type="string">
+  Name of the ZFS pool to create snapshots in.
+</ParamField>
+
+## [btrfs_snapshot] section
+
+<ParamField path="btrfs_snapshot.enable" type="boolean" default="false">
+  Enable Btrfs snapshot support. When enabled, the worker creates a Btrfs snapshot after each successful sync.
+</ParamField>
+
+<ParamField path="btrfs_snapshot.snapshot_path" type="string">
+  Directory under which Btrfs snapshots are stored. This can be overridden per mirror with `snapshot_path`.
+</ParamField>
+
+## [docker] section
+
+<ParamField path="docker.enable" type="boolean" default="false">
+  Enable Docker support for mirrors that use the `command` provider with a `docker_image`. The user running the worker must be in the `docker` group.
+</ParamField>
+
+<ParamField path="docker.volumes" type="string[]">
+  Default volume mounts passed to every Docker container, in the format `host_path:container_path[:options]`. Mirrors can extend this with `docker_volumes`.
+</ParamField>
+
+<ParamField path="docker.options" type="string[]">
+  Default extra options passed to `docker run` for every container. Mirrors can extend this with `docker_options`.
+</ParamField>
+
+## [include] section
+
+<ParamField path="include.include_mirrors" type="string">
+  Glob pattern pointing to additional TOML files that contain `[[mirrors]]` entries. All matched files are loaded and merged into the worker's mirror list at startup.
+
+  ```toml
+  [include]
+  include_mirrors = "/etc/tunasync/mirrors.d/*.conf"
+  ```
+
+  Each included file must use the same `[[mirrors]]` TOML array format.
+</ParamField>
+
+## Hot reload
+
+Send `SIGHUP` to the worker process to reload the configuration without stopping running jobs:
+
+```shell
+kill -HUP $(pidof tunasync-worker)
+```
+
+You can also trigger a reload remotely with `tunasynctl reload -w <worker-id>`. Running jobs continue uninterrupted; the new configuration takes effect for the next sync cycle.

@@ -1,0 +1,326 @@
+---
+title: "tunasync mirror job configuration: [[mirrors]] options"
+description: "Configure individual mirror jobs in worker.conf. Set provider, upstream, interval, memory limits, exec hooks, environment variables, and child mirrors."
+---
+
+Each mirror sync job is defined as a `[[mirrors]]` entry in `worker.conf` (or in a file loaded via `[include]`). Because TOML uses double-bracket syntax for arrays of tables, every `[[mirrors]]` block appends one job to the list. Fields not set in a mirror block inherit from `[global]` defaults where applicable.
+
+## Basic example
+
+```toml
+[[mirrors]]
+name     = "alpine"
+provider = "rsync"
+upstream = "rsync://rsync.alpinelinux.org/alpine/"
+interval = 1440
+memory_limit = "256M"
+```
+
+## Core fields
+
+<ParamField path="name" type="string" required>
+  Unique name for this mirror job within the worker. Used in log file names, reported to the manager, and available as `{{.Name}}` in `log_dir` templates.
+</ParamField>
+
+<ParamField path="provider" type="string" required>
+  Sync provider. Accepted values:
+
+  - `rsync` — runs rsync directly against the upstream.
+  - `two-stage-rsync` — rsync with a metadata-first stage 1 pass followed by a data stage 2 pass. Designed for Debian-style repositories.
+  - `command` — runs an arbitrary shell command or Docker container.
+</ParamField>
+
+<ParamField path="upstream" type="string">
+  Upstream source URL. Format depends on the provider:
+  - `rsync` / `two-stage-rsync`: `rsync://host/module/`
+  - `command`: used as the `TUNASYNC_UPSTREAM_URL` environment variable passed to the command.
+</ParamField>
+
+<ParamField path="interval" type="number">
+  Sync interval in minutes. Overrides `global.interval` for this mirror.
+</ParamField>
+
+<ParamField path="retry" type="number">
+  Number of retry attempts on failure. Overrides `global.retry`.
+</ParamField>
+
+<ParamField path="timeout" type="number">
+  Maximum wall-clock time in seconds for a single sync run. Overrides `global.timeout`. Zero means no timeout.
+</ParamField>
+
+## Directory options
+
+<ParamField path="mirror_dir" type="string">
+  Absolute path to the directory where this mirror's data is stored. Overrides `global.mirror_dir`.
+</ParamField>
+
+<ParamField path="mirror_subdir" type="string">
+  Subdirectory appended to `mirror_dir` for this mirror's data. Useful when multiple mirrors share a parent directory.
+</ParamField>
+
+<ParamField path="log_dir" type="string">
+  Directory for this mirror's log files. Overrides `global.log_dir`. Supports the `{{.Name}}` template variable.
+</ParamField>
+
+## Environment variables
+
+<ParamField path="env" type="object">
+  Key-value map of environment variables set in the sync process environment. The worker also always sets `TUNASYNC_MIRROR_NAME`, `TUNASYNC_WORKING_DIR`, `TUNASYNC_UPSTREAM_URL`, `TUNASYNC_LOG_DIR`, and `TUNASYNC_LOG_FILE` for the command provider.
+
+  ```toml
+  [[mirrors]]
+  name    = "clojars"
+  provider = "command"
+  command  = "/home/scripts/s3.sh"
+  upstream = "s3://clojars-repo-production/"
+
+    [mirrors.env]
+    TUNASYNC_S3_ENDPOINT  = "https://s3.dualstack.us-east-2.amazonaws.com"
+    TUNASYNC_AWS_OPTIONS  = "--delete --exclude index.html"
+  ```
+</ParamField>
+
+## High availability
+
+<ParamField path="role" type="string">
+  HA role for this mirror. Accepted values: `master`, `slave`. Used in multi-worker setups where one worker acts as the primary syncer and others serve as read replicas.
+</ParamField>
+
+## Exec hooks
+
+<ParamField path="exec_on_success" type="string[]">
+  Commands to run after a successful sync. When set, this list **completely replaces** `global.exec_on_success` for this mirror.
+</ParamField>
+
+<ParamField path="exec_on_failure" type="string[]">
+  Commands to run after a failed sync. When set, this list **completely replaces** `global.exec_on_failure` for this mirror.
+</ParamField>
+
+<ParamField path="exec_on_success_extra" type="string[]">
+  Commands appended to `global.exec_on_success`. Both the global list and this list run on success.
+</ParamField>
+
+<ParamField path="exec_on_failure_extra" type="string[]">
+  Commands appended to `global.exec_on_failure`. Both the global list and this list run on failure.
+</ParamField>
+
+## Exit code handling
+
+<ParamField path="success_exit_codes" type="number[]">
+  Additional process exit codes treated as success. Merged with `global.dangerous_global_success_exit_codes`.
+</ParamField>
+
+<ParamField path="rsync_success_exit_codes" type="number[]">
+  Additional rsync exit codes treated as success. Only effective for `rsync` and `two-stage-rsync` providers. Merged with `global.dangerous_global_rsync_success_exit_codes`.
+
+  ```toml
+  [[mirrors]]
+  name     = "elvish"
+  provider = "rsync"
+  upstream = "rsync://rsync.elv.sh/elvish/"
+  rsync_success_exit_codes = [23, 24]
+  ```
+
+  Exit code `23` means a partial transfer and `24` means some source files vanished during transfer — both are often acceptable.
+</ParamField>
+
+## Command provider options
+
+These fields apply when `provider = "command"`.
+
+<ParamField path="command" type="string">
+  Shell command to run as the sync job. The command receives several `TUNASYNC_*` environment variables. Example: `/home/scripts/debian.sh sync:archive:debian`.
+</ParamField>
+
+<ParamField path="fail_on_match" type="string">
+  If the command's standard output or error contains this string, the job is marked as failed even if the process exits with code 0.
+
+  ```toml
+  fail_on_match = "fatal: "
+  ```
+</ParamField>
+
+<ParamField path="size_pattern" type="string">
+  A Go regular expression with one capture group that extracts the mirror size from the command's output. The captured value is reported to the manager.
+
+  ```toml
+  size_pattern = "Total size is ([0-9\\.]+[KMGTP]?)"
+  ```
+</ParamField>
+
+## Rsync provider options
+
+These fields apply when `provider = "rsync"` or `provider = "two-stage-rsync"`.
+
+<ParamField path="use_ipv6" type="boolean" default="false">
+  Pass `-6` to rsync, forcing IPv6 connections.
+</ParamField>
+
+<ParamField path="use_ipv4" type="boolean" default="false">
+  Pass `-4` to rsync, forcing IPv4 connections.
+</ParamField>
+
+<ParamField path="exclude_file" type="string">
+  Path to an rsync exclude-patterns file, passed via `--exclude-from`.
+
+  ```toml
+  exclude_file = "/etc/excludes/ubuntu-ports-exclude.txt"
+  ```
+</ParamField>
+
+<ParamField path="username" type="string">
+  Username for rsync authentication.
+</ParamField>
+
+<ParamField path="password" type="string">
+  Password for rsync authentication.
+</ParamField>
+
+<ParamField path="rsync_no_timeout" type="boolean" default="false">
+  Disable the rsync `--timeout` flag. By default the worker sets a timeout based on `timeout`; this disables it.
+</ParamField>
+
+<ParamField path="rsync_timeout" type="number">
+  Value passed to rsync's `--timeout` flag in seconds. Overrides the automatically computed value.
+</ParamField>
+
+<ParamField path="rsync_options" type="string[]">
+  Extra rsync flags appended after `global.rsync_options`. Example: `["--delete-excluded", "--bwlimit=50000"]`.
+</ParamField>
+
+<ParamField path="rsync_override" type="string[]">
+  Rsync flags that **replace** the provider-generated flags. Use with caution — you must supply all required flags yourself.
+</ParamField>
+
+<ParamField path="rsync_override_only" type="boolean" default="false">
+  When `true`, only the flags in `rsync_override` are passed to rsync — no provider defaults are added.
+</ParamField>
+
+## two-stage-rsync options
+
+<ParamField path="stage1_profile" type="string">
+  Stage 1 behaviour profile. Use `"debian"` for Debian-style archive layouts (syncs metadata files first, then package data).
+
+  ```toml
+  [[mirrors]]
+  name          = "ubuntu"
+  provider      = "two-stage-rsync"
+  stage1_profile = "debian"
+  upstream      = "rsync://archive.ubuntu.com/ubuntu/"
+  rsync_options = ["--delete-excluded"]
+  memory_limit  = "256M"
+  ```
+</ParamField>
+
+## Resource limits
+
+<ParamField path="memory_limit" type="string">
+  Maximum memory the sync process may use, enforced via cgroups. Requires `[cgroup] enable = true`. Accepts human-readable sizes: `"256M"`, `"1G"`.
+
+  ```toml
+  memory_limit = "256M"
+  ```
+</ParamField>
+
+## Docker options
+
+These fields apply when `[docker] enable = true` and a `docker_image` is specified.
+
+<ParamField path="docker_image" type="string">
+  Docker image to run the command inside. When set, the `command` is executed within a container using this image.
+
+  ```toml
+  docker_image = "tunathu/tunasync-scripts:latest"
+  ```
+</ParamField>
+
+<ParamField path="docker_volumes" type="string[]">
+  Additional volume mounts for this mirror's container, in `host:container[:options]` format. Appended to `[docker].volumes`.
+
+  ```toml
+  docker_volumes = [
+    "/etc/misc/ftpsync-debian.conf:/ftpsync/etc/ftpsync-debian.conf:ro",
+    "/log/ftpsync:/home/log/tunasync/ftpsync",
+  ]
+  ```
+</ParamField>
+
+<ParamField path="docker_options" type="string[]">
+  Additional options passed to `docker run` for this mirror's container. Appended to `[docker].options`.
+
+  ```toml
+  docker_options = ["--cpus", "20"]
+  ```
+</ParamField>
+
+## Snapshot path
+
+<ParamField path="snapshot_path" type="string">
+  Override the global `btrfs_snapshot.snapshot_path` for this mirror. Only relevant when Btrfs snapshot support is enabled.
+</ParamField>
+
+## Child mirrors
+
+A `[[mirrors]]` block can contain nested `[[mirrors.mirrors]]` entries. Child mirrors inherit all fields from the parent and can override individual values. The parent itself is not scheduled as a job — only leaf entries (those without children) are registered as sync jobs.
+
+```toml
+[[mirrors]]
+name     = "debian-family"
+provider = "two-stage-rsync"
+stage1_profile = "debian"
+memory_limit   = "256M"
+rsync_options  = ["--delete-excluded"]
+
+  [[mirrors.mirrors]]
+  name     = "debian"
+  upstream = "rsync://ftp.nluug.nl/debian/"
+
+  [[mirrors.mirrors]]
+  name     = "kali"
+  upstream = "rsync://ftp.nluug.nl/kali/"
+```
+
+Both `debian` and `kali` inherit `provider`, `stage1_profile`, `memory_limit`, and `rsync_options` from the parent.
+
+## Provider examples
+
+<Tabs>
+  <Tab title="rsync">
+    ```toml
+    [[mirrors]]
+    name         = "kernel"
+    provider     = "rsync"
+    upstream     = "rsync://rsync.kernel.org/pub/linux/kernel/"
+    rsync_options = ["--delete-excluded"]
+    memory_limit = "256M"
+    ```
+  </Tab>
+  <Tab title="two-stage-rsync">
+    ```toml
+    [[mirrors]]
+    name           = "ubuntu"
+    provider       = "two-stage-rsync"
+    stage1_profile  = "debian"
+    upstream       = "rsync://archive.ubuntu.com/ubuntu/"
+    rsync_options  = ["--delete-excluded"]
+    memory_limit   = "256M"
+    ```
+  </Tab>
+  <Tab title="command">
+    ```toml
+    [[mirrors]]
+    name         = "debian"
+    provider     = "command"
+    upstream     = "rsync://mirrors.tuna.tsinghua.edu.cn/debian/"
+    command      = "/home/scripts/debian.sh sync:archive:debian"
+    size_pattern = "Total size is ([0-9\\.]+[KMGTP]?)"
+    docker_image = "tunathu/ftpsync"
+    docker_volumes = [
+      "/etc/misc/ftpsync-debian.conf:/ftpsync/etc/ftpsync-debian.conf:ro",
+    ]
+
+      [mirrors.env]
+      FTPSYNC_LOG_DIR = "/home/log/tunasync/ftpsync"
+    ```
+  </Tab>
+</Tabs>

@@ -1,0 +1,61 @@
+---
+title: "tunasync: distributed mirror job management for operators"
+description: "tunasync manages software mirror synchronization across a fleet of workers. Learn what tunasync does, its key components, and when to use it."
+---
+
+tunasync is the mirror job management system that powers [TUNA mirrors](https://mirrors.tuna.tsinghua.edu.cn), one of the largest open-source software mirrors in China. It gives mirror operators a structured way to define, schedule, and monitor dozens or hundreds of synchronization jobs across one or more server processes, with a central manager tracking state and a lightweight control client for day-to-day operations.
+
+## What problem it solves
+
+Running a public software mirror means keeping hundreds of repositories in sync with their upstream sources — each on its own schedule, using different protocols, and subject to different failure modes. Without a management layer you end up with a tangle of cron jobs, ad-hoc scripts, and no reliable way to know what is syncing, what has failed, or how to stop a runaway job without logging into the server.
+
+tunasync centralises that coordination. The manager holds a single authoritative view of every job's state, stored in a persistent database. Workers pull their configuration from local TOML files and execute jobs on schedule, reporting results back to the manager. An operator can inspect status, restart a failed mirror, or pause a job from any machine using the `tunasynctl` client — without touching the worker host directly.
+
+## Key components
+
+**Manager** — A stateful HTTP server that stores job status in a local database (BoltDB by default, with Badger, LevelDB, and Redis also supported). The manager exposes a REST API used by both workers and the `tunasynctl` client. It does not run sync jobs itself; it tracks them and forwards control commands to the appropriate worker.
+
+**Worker** — A daemon that runs on each sync host. On startup it registers itself with the manager, then begins scheduling mirror jobs according to its configuration. After each job completes it reports the new status back to the manager via HTTP.
+
+**tunasynctl** — The command-line control client. It sends commands (start, stop, disable, restart, reload) to the manager API, which then forwards them to the relevant worker. You do not need direct access to the worker host to operate jobs.
+
+**Providers** — The execution backends that workers use to actually sync data. Three providers are built in: `rsync` for standard rsync mirrors, `two-stage-rsync` for Debian-style repositories that require a two-pass sync, and `command` for arbitrary shell scripts.
+
+## Job lifecycle states
+
+Every mirror job tracked by tunasync carries one of seven states, defined in the source as a `SyncStatus` type:
+
+| State | Meaning |
+|---|---|
+| `none` | Job has been registered but has not run yet |
+| `pre-syncing` | Pre-job hooks are executing before the main sync |
+| `syncing` | The provider is actively transferring data |
+| `success` | The last sync completed without error |
+| `failed` | The last sync exited with an error |
+| `paused` | The job has been stopped by an operator (`tunasynctl stop`) |
+| `disabled` | The job has been disabled by an operator (`tunasynctl disable`) and its goroutine has been stopped |
+
+<Note>
+`paused` and `disabled` are distinct. A paused job will resume on the next scheduled interval. A disabled job will not run again until explicitly re-enabled.
+</Note>
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Deploy a working manager and worker with a minimal real-world configuration in under 10 minutes.
+  </Card>
+  <Card title="Architecture" icon="diagram-project" href="/architecture">
+    Deep-dive into the manager-worker model, job scheduling, the hook pipeline, and the HTTP API.
+  </Card>
+  <Card title="Providers" icon="arrows-rotate" href="/providers/rsync">
+    Learn when to use rsync, two-stage rsync, or the command provider for your mirrors.
+  </Card>
+  <Card title="Operations" icon="terminal" href="/operations/job-management">
+    Manage running jobs, reload configs live, and set up tunasync as a systemd service.
+  </Card>
+</CardGroup>
+
+<Info>
+tunasync is open source and licensed under GPLv3. Pre-built binaries for Linux x86_64 and ARM64 are available on the [GitHub releases page](https://github.com/tuna/tunasync/releases/latest).
+</Info>

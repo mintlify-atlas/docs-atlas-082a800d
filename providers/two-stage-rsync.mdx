@@ -1,0 +1,170 @@
+---
+title: "Two-stage rsync provider for Debian-style package repos"
+description: "Sync Debian-style package repositories with two-stage rsync: first sync package indexes, then the full archive. Prevents broken apt sources during sync."
+---
+
+The `two-stage-rsync` provider is designed for Debian-style package repositories such as Ubuntu, Kali Linux, Linux Mint, Raspbian, and Raspberry Pi OS. Syncing the full archive tree in a single rsync pass can leave the repository in a temporarily inconsistent state — package index files may reference packages that have not yet arrived, causing `apt` errors for end users. Two-stage rsync solves this by splitting the sync into two sequential rsync runs.
+
+## How it works
+
+<Steps>
+  <Step title="Stage 1 — sync package indexes">
+    The first rsync run uses a built-in profile to selectively sync only the structural files needed to keep the repository navigable: `by-hash/` directories and diff indexes. Release files, `Packages`, `Sources`, `Contents`, and installer trees are intentionally excluded so that the index does not yet point to packages that haven't arrived.
+  </Step>
+  <Step title="Stage 2 — sync the full archive">
+    The second rsync run syncs everything, including deletions (`--delete`, `--delete-after`, `--delay-updates`). By this point all package files are present, so updating the index is safe. Any `rsync_options` you configure are applied in stage 2 only.
+  </Step>
+</Steps>
+
+<Note>
+The two-stage approach follows the method used by the official Debian ftpsync tool. See the [reference implementation](https://salsa.debian.org/mirror-team/archvsync/-/blob/master/bin/ftpsync#L431) for background.
+</Note>
+
+## Stage 1 profiles
+
+The `stage1_profile` field selects which files are excluded during stage 1. The following profiles are built into tunasync:
+
+<Tabs>
+  <Tab title="debian">
+    The standard profile for Debian, Ubuntu, Kali, Raspbian, and most Debian-derivative repos.
+
+    Excludes during stage 1:
+    - `*.diff/Index`
+    - `Contents*`
+    - `Packages*`
+    - `Sources*`
+    - `Release*`, `InRelease`
+    - `i18n/*`
+    - `dep11/*`
+    - `installer-*/current`
+    - `ls-lR*`
+
+    Includes during stage 1:
+    - `*.diff/` directories
+    - `by-hash/` directories
+
+    ```toml
+    stage1_profile = "debian"
+    ```
+  </Tab>
+  <Tab title="debian-oldstyle">
+    A simplified profile for older Debian-style repositories that do not use `by-hash` or diff directories.
+
+    Excludes during stage 1:
+    - `Packages*`
+    - `Sources*`
+    - `Release*`, `InRelease`
+    - `i18n/*`
+    - `ls-lR*`
+    - `dep11/*`
+
+    ```toml
+    stage1_profile = "debian-oldstyle"
+    ```
+  </Tab>
+</Tabs>
+
+<Warning>
+`stage1_profile` is required and must be one of the values above. tunasync returns an error and refuses to run the job if an unrecognised profile name is provided.
+</Warning>
+
+## Configuration fields
+
+`two-stage-rsync` accepts the same fields as the [rsync provider](/providers/rsync), with the following differences:
+
+| Field | Notes |
+|---|---|
+| `stage1_profile` | **Required.** Selects the stage 1 exclude/include profile. |
+| `rsync_options` | Applied in **stage 2 only**. |
+| `rsync_override` | Not supported — the two-stage provider uses fixed base options for each stage. |
+| `rsync_override_only` | Not supported. |
+
+All other fields — `upstream`, `username`, `password`, `exclude_file`, `use_ipv4`, `use_ipv6`, `rsync_no_timeout`, `rsync_timeout`, `rsync_success_exit_codes`, `memory_limit` — behave identically to the rsync provider.
+
+## Examples from workers.conf
+
+<CodeGroup>
+
+```toml ubuntu
+[[mirrors]]
+name = "ubuntu"
+provider = "two-stage-rsync"
+stage1_profile = "debian"
+upstream = "rsync://archive.ubuntu.com/ubuntu/"
+rsync_options = ["--delete-excluded"]
+memory_limit = "256M"
+```
+
+```toml ubuntu-ports
+[[mirrors]]
+name = "ubuntu-ports"
+provider = "two-stage-rsync"
+stage1_profile = "debian"
+upstream = "rsync://ports.ubuntu.com/ubuntu-ports/"
+rsync_options = ["--delete-excluded"]
+exclude_file = "/etc/excludes/ubuntu-ports-exclude.txt"
+memory_limit = "256M"
+```
+
+```toml kali
+[[mirrors]]
+name = "kali"
+provider = "two-stage-rsync"
+stage1_profile = "debian"
+upstream = "rsync://ftp.nluug.nl/kali/"
+rsync_options = ["--delete-excluded"]
+memory_limit = "256M"
+```
+
+```toml linuxmint
+[[mirrors]]
+name = "linuxmint"
+provider = "two-stage-rsync"
+stage1_profile = "debian"
+upstream = "rsync://mirrors.kernel.org/linuxmint-packages/"
+rsync_options = ["--delete-excluded"]
+memory_limit = "256M"
+```
+
+```toml raspberrypi
+[[mirrors]]
+name = "raspberrypi"
+provider = "two-stage-rsync"
+stage1_profile = "debian"
+upstream = "rsync://apt-repo.raspberrypi.org/archive/debian/"
+memory_limit = "256M"
+```
+
+```toml raspbian
+[[mirrors]]
+name = "raspbian"
+provider = "two-stage-rsync"
+stage1_profile = "debian"
+upstream = "rsync://archive.raspbian.org/archive/"
+rsync_options = ["--delete-excluded"]
+memory_limit = "256M"
+```
+
+```toml armbian
+[[mirrors]]
+name = "armbian"
+provider = "two-stage-rsync"
+stage1_profile = "debian"
+upstream = "rsync://rsync.armbian.com/apt/"
+memory_limit = "256M"
+```
+
+</CodeGroup>
+
+## When to use two-stage rsync vs plain rsync
+
+| Use `two-stage-rsync` | Use `rsync` |
+|---|---|
+| Debian, Ubuntu, or any apt-based repository | Non-apt archives (kernel.org, CTAN, CPAN, etc.) |
+| Upstream uses `by-hash` or diff directories | Upstream is a simple file tree |
+| End users run `apt update` against your mirror | End users browse or download files directly |
+| Partial syncs would expose inconsistent indexes | Partial syncs are acceptable |
+
+<Tip>
+If you are unsure whether a repository needs two-stage sync, check whether the upstream contains `dists/` and `pool/` directories at the top level. If it does, use `two-stage-rsync` with `stage1_profile = "debian"`.
+</Tip>

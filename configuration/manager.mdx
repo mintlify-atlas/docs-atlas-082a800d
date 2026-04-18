@@ -1,0 +1,142 @@
+---
+title: "tunasync manager.conf: complete configuration reference"
+description: "Complete reference for tunasync manager.conf. Configure the HTTP server address, port, TLS certificates, database backend, and debug mode."
+---
+
+The tunasync manager is a central HTTP server that coordinates workers and stores mirror sync state. All configuration lives in a single TOML file, conventionally named `manager.conf`. Command-line flags can override any value in the file at startup.
+
+## Example configuration
+
+```toml manager.conf
+debug = false
+
+[server]
+addr     = "127.0.0.1"
+port     = 14242
+ssl_cert = ""
+ssl_key  = ""
+
+[files]
+db_type = "bolt"
+db_file = "/var/lib/tunasync/tunasync.db"
+ca_cert = ""
+```
+
+## Top-level options
+
+<ParamField path="debug" type="boolean" default="false">
+  Enable verbose debug logging. Set to `true` to increase log verbosity during development or troubleshooting.
+</ParamField>
+
+## [server] section
+
+The `[server]` block controls the HTTP (or HTTPS) listener that workers and `tunasynctl` connect to.
+
+<ParamField path="server.addr" type="string" default="127.0.0.1">
+  IP address the manager HTTP server binds to. Set to `0.0.0.0` to listen on all interfaces.
+</ParamField>
+
+<ParamField path="server.port" type="number" default="14242">
+  TCP port the manager listens on.
+</ParamField>
+
+<ParamField path="server.ssl_cert" type="string">
+  Path to the PEM-encoded TLS certificate file. Required when serving HTTPS. Must be set together with `ssl_key`.
+</ParamField>
+
+<ParamField path="server.ssl_key" type="string">
+  Path to the PEM-encoded TLS private key file. Required when serving HTTPS. Must be set together with `ssl_cert`.
+</ParamField>
+
+## [files] section
+
+The `[files]` block controls persistent storage and trust configuration.
+
+<ParamField path="files.db_type" type="string" default="bolt">
+  Database backend. Accepted values: `bolt`, `badger`, `leveldb`, `redis`.
+</ParamField>
+
+<ParamField path="files.db_file" type="string" default="/var/lib/tunasync/tunasync.db">
+  Path to the database file (for `bolt`, `badger`, and `leveldb` backends) or the Redis connection URL (for the `redis` backend). See [Database backends](#database-backends) below.
+</ParamField>
+
+<ParamField path="files.ca_cert" type="string">
+  Path to a PEM-encoded CA certificate used by the manager when making outbound HTTPS connections to workers. Leave empty when workers communicate over plain HTTP.
+</ParamField>
+
+## Database backends
+
+<AccordionGroup>
+  <Accordion title="bolt (default)">
+    The default embedded key-value store. No additional services are required. Set `db_type = "bolt"` and point `db_file` at a writable file path:
+
+    ```toml
+    [files]
+    db_type = "bolt"
+    db_file = "/var/lib/tunasync/tunasync.db"
+    ```
+  </Accordion>
+
+  <Accordion title="badger">
+    An embedded LSM-tree store. Set `db_type = "badger"` and point `db_file` at a writable directory:
+
+    ```toml
+    [files]
+    db_type = "badger"
+    db_file = "/var/lib/tunasync/tunasync.badger"
+    ```
+  </Accordion>
+
+  <Accordion title="leveldb">
+    An embedded LevelDB store. Set `db_type = "leveldb"` and point `db_file` at a writable directory:
+
+    ```toml
+    [files]
+    db_type = "leveldb"
+    db_file = "/var/lib/tunasync/tunasync.leveldb"
+    ```
+  </Accordion>
+
+  <Accordion title="redis">
+    An external Redis server. Set `db_type = "redis"` and set `db_file` to a Redis connection URL:
+
+    ```toml
+    [files]
+    db_type = "redis"
+    db_file = "redis://user:password@host:6379/0"
+    ```
+
+    The URL format is `redis://[user:password@]host:port/db_number`.
+  </Accordion>
+</AccordionGroup>
+
+## TLS configuration
+
+The manager and workers communicate over HTTP or HTTPS.
+
+<Tip>
+  If the manager and all workers run on the same host, plain HTTP is sufficient. Leave `ssl_cert`, `ssl_key`, and `ca_cert` empty and use an `http://` base URL in each worker's `[manager]` section.
+</Tip>
+
+When enabling HTTPS:
+
+1. Set `ssl_cert` and `ssl_key` in `[server]` to serve TLS.
+2. Set `ca_cert` in `[files]` to the CA that signed the workers' certificates, so the manager can verify worker HTTPS endpoints.
+3. In each worker config, set `api_base` to an `https://` URL and set `ca_cert` to the CA that signed the manager's certificate.
+
+## CLI flags
+
+The following flags override the corresponding config file values. They are accepted by `tunasync manager`.
+
+| Flag | Config key | Description |
+|---|---|---|
+| `--addr` | `server.addr` | Manager listen address |
+| `--port` | `server.port` | Manager listen port |
+| `--cert` | `server.ssl_cert` | TLS certificate path |
+| `--key` | `server.ssl_key` | TLS private key path |
+| `--db-file` | `files.db_file` | Database file or Redis URL |
+| `--db-type` | `files.db_type` | Database backend type |
+
+<Note>
+  Both `--cert` and `--key` must be provided together on the command line to activate TLS via flags.
+</Note>

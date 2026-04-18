@@ -1,0 +1,70 @@
+---
+title: "tunasynctl configuration: ctl.conf options and CLI flags"
+description: "Configure tunasynctl with a TOML config file at ~/.config/tunasync/ctl.conf or /etc/tunasync/ctl.conf to set the manager address and port."
+---
+
+`tunasynctl` is the command-line client for controlling a running tunasync manager. It supports a TOML configuration file so you do not need to pass the manager address and port on every invocation. Command-line flags always take precedence over values in the config file.
+
+## Config file locations
+
+`tunasynctl` reads configuration from two locations. Values in the user file override values in the system file.
+
+| Precedence | Path | Scope |
+|---|---|---|
+| Lower | `/etc/tunasync/ctl.conf` | System-wide defaults |
+| Higher | `~/.config/tunasync/ctl.conf` | Per-user overrides |
+
+You can also specify a custom path with the `--config` flag, which overrides both locations.
+
+## Example configuration
+
+```toml ~/.config/tunasync/ctl.conf
+manager_addr = "127.0.0.1"
+manager_port = 14242
+ca_cert      = ""
+```
+
+## Options
+
+<ParamField path="manager_addr" type="string" default="localhost">
+  Hostname or IP address of the tunasync manager. Used to construct the base URL for all API calls.
+</ParamField>
+
+<ParamField path="manager_port" type="number" default="14242">
+  TCP port the manager is listening on.
+</ParamField>
+
+<ParamField path="ca_cert" type="string">
+  Path to a PEM-encoded CA certificate. When set, `tunasynctl` contacts the manager over HTTPS and verifies the server certificate against this CA. When empty, plain HTTP is used.
+</ParamField>
+
+## CLI flags
+
+All config file values can be overridden on the command line. Flags are accepted by every `tunasynctl` subcommand.
+
+| Flag | Alias | Config key | Description |
+|---|---|---|---|
+| `--manager` | `-m` | `manager_addr` | Manager hostname or IP |
+| `--port` | `-p` | `manager_port` | Manager port |
+| `--ca-cert` | — | `ca_cert` | CA certificate path |
+| `--config` | `-c` | — | Load config from a custom file path |
+
+Example overriding the manager address at the command line:
+
+```shell
+tunasynctl list --all -m 192.168.1.10 -p 14242
+```
+
+## TLS note
+
+When the manager is configured with `ssl_cert` and `ssl_key`, set `ca_cert` in `ctl.conf` to the CA that signed the manager's certificate. `tunasynctl` will then use HTTPS automatically.
+
+```toml
+manager_addr = "mirror-manager.example.com"
+manager_port = 14242
+ca_cert      = "/etc/tunasync/ca.pem"
+```
+
+<Note>
+  If `ca_cert` is empty, `tunasynctl` always uses plain HTTP regardless of the manager's TLS configuration.
+</Note>

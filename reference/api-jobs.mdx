@@ -1,0 +1,304 @@
+---
+title: "Manager API: GET /jobs, POST /cmd, and size endpoints"
+description: "GET /jobs lists all mirror statuses. POST /cmd sends control commands. Includes MirrorStatus and ClientCmd request/response schemas."
+---
+
+The jobs endpoints expose the current sync state of every mirror known to the manager and provide the mechanism for sending control commands to workers. `GET /jobs` is the primary endpoint for status pages and monitoring scripts; `POST /cmd` is used by `tunasynctl` for all job-control operations (start, stop, disable, restart, ping, reload).
+
+---
+
+## GET /jobs
+
+List all mirror jobs across every registered worker. Returns `WebMirrorStatus` objects, which include both human-readable timestamps (formatted `"2006-01-02 15:04:05 -0700"`) and Unix timestamp variants for each time field.
+
+**Response** — `200 OK` with an array of `WebMirrorStatus` objects.
+
+<ResponseField name="name" type="string" required>
+  Mirror name as defined in the worker's configuration.
+</ResponseField>
+
+<ResponseField name="is_master" type="boolean" required>
+  Whether this worker is the designated primary for the mirror.
+</ResponseField>
+
+<ResponseField name="status" type="string" required>
+  Current sync status. One of: `none`, `failed`, `success`, `syncing`, `pre-syncing`, `paused`, `disabled`.
+</ResponseField>
+
+<ResponseField name="last_update" type="string">
+  Human-readable timestamp of the last successful sync completion. Format: `2006-01-02 15:04:05 -0700`.
+</ResponseField>
+
+<ResponseField name="last_update_ts" type="integer">
+  Unix timestamp equivalent of `last_update`.
+</ResponseField>
+
+<ResponseField name="last_started" type="string">
+  Human-readable timestamp of when the most recent sync attempt began.
+</ResponseField>
+
+<ResponseField name="last_started_ts" type="integer">
+  Unix timestamp equivalent of `last_started`.
+</ResponseField>
+
+<ResponseField name="last_ended" type="string">
+  Human-readable timestamp of when the most recent sync attempt ended (success or failure).
+</ResponseField>
+
+<ResponseField name="last_ended_ts" type="integer">
+  Unix timestamp equivalent of `last_ended`.
+</ResponseField>
+
+<ResponseField name="next_schedule" type="string">
+  Human-readable timestamp of the next scheduled sync run.
+</ResponseField>
+
+<ResponseField name="next_schedule_ts" type="integer">
+  Unix timestamp equivalent of `next_schedule`.
+</ResponseField>
+
+<ResponseField name="upstream" type="string">
+  Upstream source URL for this mirror.
+</ResponseField>
+
+<ResponseField name="size" type="string">
+  Approximate on-disk size of the mirror, e.g. `"120 GiB"`. Empty or `"unknown"` if not yet measured.
+</ResponseField>
+
+```bash
+curl http://127.0.0.1:14242/jobs
+```
+
+Example response:
+
+```json
+[
+  {
+    "name": "archlinux",
+    "is_master": true,
+    "status": "success",
+    "last_update": "2024-05-01 11:00:00 +0000",
+    "last_update_ts": 1714561200,
+    "last_started": "2024-05-01 10:55:00 +0000",
+    "last_started_ts": 1714560900,
+    "last_ended": "2024-05-01 11:00:00 +0000",
+    "last_ended_ts": 1714561200,
+    "next_schedule": "2024-05-01 17:00:00 +0000",
+    "next_schedule_ts": 1714582800,
+    "upstream": "rsync://mirror.example.com/archlinux",
+    "size": "120 GiB"
+  }
+]
+```
+
+---
+
+## DELETE /jobs/disabled
+
+Remove all mirror job records whose status is `disabled` from the manager's database. This is a destructive, irreversible operation; use it to clean up after mirrors have been permanently removed from a worker's configuration.
+
+**Response** — `200 OK`:
+
+```json
+{ "message": "flushed" }
+```
+
+```bash
+curl -X DELETE http://127.0.0.1:14242/jobs/disabled
+```
+
+<Tip>
+  `tunasynctl flush` wraps this endpoint.
+</Tip>
+
+---
+
+## GET /workers/:id/jobs
+
+List the mirror jobs for a single worker. Returns raw `MirrorStatus` objects (as stored internally), which include `worker` and `error_msg` fields not present in the `WebMirrorStatus` used by `GET /jobs`.
+
+**Path parameter**
+
+<ParamField path="id" type="string" required>
+  The ID of the worker whose jobs you want to retrieve.
+</ParamField>
+
+**Response** — `200 OK` with an array of `MirrorStatus` objects.
+
+<ResponseField name="name" type="string" required>
+  Mirror name.
+</ResponseField>
+
+<ResponseField name="worker" type="string" required>
+  ID of the worker that owns this job.
+</ResponseField>
+
+<ResponseField name="is_master" type="boolean" required>
+  Whether this worker is the primary for the mirror.
+</ResponseField>
+
+<ResponseField name="status" type="string" required>
+  Current sync status. One of: `none`, `failed`, `success`, `syncing`, `pre-syncing`, `paused`, `disabled`.
+</ResponseField>
+
+<ResponseField name="last_update" type="string">
+  RFC 3339 timestamp of the last successful sync completion.
+</ResponseField>
+
+<ResponseField name="last_started" type="string">
+  RFC 3339 timestamp of when the most recent sync started.
+</ResponseField>
+
+<ResponseField name="last_ended" type="string">
+  RFC 3339 timestamp of when the most recent sync ended.
+</ResponseField>
+
+<ResponseField name="next_schedule" type="string">
+  RFC 3339 timestamp of the next scheduled run.
+</ResponseField>
+
+<ResponseField name="upstream" type="string">
+  Upstream source URL.
+</ResponseField>
+
+<ResponseField name="size" type="string">
+  Approximate on-disk size of the mirror.
+</ResponseField>
+
+<ResponseField name="error_msg" type="string">
+  Last error message, if the most recent sync attempt failed. Empty string on success.
+</ResponseField>
+
+```bash
+curl http://127.0.0.1:14242/workers/worker-01/jobs
+```
+
+---
+
+## POST /cmd
+
+Send a control command to a specific worker's mirror job. This is the endpoint used by `tunasynctl` for all job-control sub-commands (`start`, `stop`, `disable`, `restart`, `ping`, `reload`). The `worker_id` field is required; the manager will return a `500` error if it is absent.
+
+**Request body** — `ClientCmd` JSON object.
+
+<ParamField body="cmd" type="string" required>
+  The command verb. One of: `start`, `stop`, `disable`, `restart`, `ping`, `reload`.
+</ParamField>
+
+<ParamField body="worker_id" type="string" required>
+  ID of the worker that should receive the command. Must match a registered worker. The manager returns an error if this field is empty.
+</ParamField>
+
+<ParamField body="mirror_id" type="string">
+  Name of the mirror job to act on. Required for all commands except `reload` (which targets the worker itself).
+</ParamField>
+
+<ParamField body="args" type="string[]">
+  Optional list of extra arguments passed through to the worker command handler.
+</ParamField>
+
+<ParamField body="options" type="object">
+  Optional map of boolean flags forwarded to the worker.
+
+  <Expandable title="options properties">
+    <ParamField body="options.force" type="boolean">
+      When `true`, overrides the worker's concurrent sync limit and forces the job to start immediately. Used by `tunasynctl start --force`.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+**Response** — `200 OK`:
+
+```json
+{ "message": "successfully send command to worker <worker_id>" }
+```
+
+<Note>
+  When `cmd` is `disable` or `stop`, the manager immediately updates the job's stored status to `disabled` or `paused` respectively, before forwarding the command to the worker. This ensures the status is correct even if the worker is temporarily unreachable.
+</Note>
+
+**Examples**
+
+<CodeGroup>
+
+```bash start
+curl -X POST http://127.0.0.1:14242/cmd \
+  -H "Content-Type: application/json" \
+  -d '{"cmd": "start", "worker_id": "worker-01", "mirror_id": "archlinux"}'
+```
+
+```bash start (force)
+curl -X POST http://127.0.0.1:14242/cmd \
+  -H "Content-Type: application/json" \
+  -d '{"cmd": "start", "worker_id": "worker-01", "mirror_id": "archlinux", "options": {"force": true}}'
+```
+
+```bash stop
+curl -X POST http://127.0.0.1:14242/cmd \
+  -H "Content-Type: application/json" \
+  -d '{"cmd": "stop", "worker_id": "worker-01", "mirror_id": "archlinux"}'
+```
+
+```bash disable
+curl -X POST http://127.0.0.1:14242/cmd \
+  -H "Content-Type: application/json" \
+  -d '{"cmd": "disable", "worker_id": "worker-01", "mirror_id": "archlinux"}'
+```
+
+```bash restart
+curl -X POST http://127.0.0.1:14242/cmd \
+  -H "Content-Type: application/json" \
+  -d '{"cmd": "restart", "worker_id": "worker-01", "mirror_id": "archlinux"}'
+```
+
+```bash reload
+curl -X POST http://127.0.0.1:14242/cmd \
+  -H "Content-Type: application/json" \
+  -d '{"cmd": "reload", "worker_id": "worker-01"}'
+```
+
+```bash ping
+curl -X POST http://127.0.0.1:14242/cmd \
+  -H "Content-Type: application/json" \
+  -d '{"cmd": "ping", "worker_id": "worker-01", "mirror_id": "archlinux"}'
+```
+
+</CodeGroup>
+
+---
+
+## POST /workers/:id/jobs/:job/size
+
+Update the stored on-disk size for a specific mirror. The manager only applies the update when the `size` field is non-empty and not equal to `"unknown"`. The response is the updated `MirrorStatus` object for that job.
+
+**Path parameters**
+
+<ParamField path="id" type="string" required>
+  Worker ID that owns the mirror.
+</ParamField>
+
+<ParamField path="job" type="string" required>
+  Mirror name to update. Must match the `name` field in the request body.
+</ParamField>
+
+**Request body**
+
+<ParamField body="name" type="string" required>
+  Mirror name. Must match the `:job` path parameter.
+</ParamField>
+
+<ParamField body="size" type="string" required>
+  Human-readable size string, e.g. `"120 GiB"`. An empty value or `"unknown"` is ignored.
+</ParamField>
+
+**Response** — `200 OK` with the updated `MirrorStatus` object (see [GET /workers/:id/jobs](#get-workers-id-jobs) for field descriptions).
+
+```bash
+curl -X POST http://127.0.0.1:14242/workers/worker-01/jobs/archlinux/size \
+  -H "Content-Type: application/json" \
+  -d '{"name": "archlinux", "size": "120 GiB"}'
+```
+
+<Tip>
+  `tunasynctl set-size -w worker-01 archlinux "120 GiB"` wraps this endpoint.
+</Tip>

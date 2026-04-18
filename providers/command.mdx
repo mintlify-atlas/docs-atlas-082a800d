@@ -1,0 +1,201 @@
+---
+title: "Command provider: run arbitrary scripts as mirror jobs"
+description: "Run any shell command or script as a mirror job with the tunasync command provider. Supports Docker images, size pattern extraction, and failure matching."
+---
+
+The command provider runs an arbitrary shell command to perform a mirror sync. This makes it possible to integrate any sync tool — `lftp`, `s3cmd`, custom Python scripts, Docker-based workflows, and more — into the tunasync job scheduler. If the upstream does not expose an rsync endpoint, or if the sync logic requires more than a single rsync invocation, the command provider is the right choice.
+
+## Required fields
+
+```toml
+[[mirrors]]
+name = "my-mirror"
+provider = "command"
+upstream = "https://example.com/source/"
+command = "/home/scripts/my-mirror.sh"
+```
+
+| Field | Description |
+|---|---|
+| `name` | Unique mirror name used in logs and the tunasync API. |
+| `provider` | Must be `"command"`. |
+| `upstream` | Source URL. Not interpreted by tunasync; passed to the script via `TUNASYNC_UPSTREAM_URL`. |
+| `command` | Shell command to execute. Parsed using POSIX shell quoting rules; arguments may be included inline. |
+
+## Optional fields
+
+<AccordionGroup>
+  <Accordion title="fail_on_match">
+    A Go regular expression. After the command exits with code 0, tunasync scans the job's log file for matches. If any match is found the job is marked as failed. Useful for tools that print errors to stdout but exit 0.
+
+    ```toml
+    fail_on_match = "fatal: "
+    ```
+  </Accordion>
+
+  <Accordion title="size_pattern">
+    A Go regular expression with one capture group. After a successful run, tunasync scans the log file and reports the first captured value as the mirror's data size. The captured group should contain a number followed by an optional SI suffix.
+
+    ```toml
+    size_pattern = "Total size is ([0-9\\.]+[KMGTP]?)"
+    ```
+
+    A common alternative used by wget-based scripts:
+
+    ```toml
+    size_pattern = "size-sum: ([0-9\\.]+[KMGTP])"
+    ```
+  </Accordion>
+
+  <Accordion title="env">
+    A map of extra environment variables to set before running the command. These are merged with the variables tunasync sets automatically; per-mirror values take precedence.
+
+    ```toml
+    [mirrors.env]
+    MIRROR_BASE_URL = "https://mirrors.example.com/dart-pub"
+    ```
+  </Accordion>
+
+  <Accordion title="docker_image">
+    Run the command inside a Docker container using this image. The mirror directory and log directory are automatically mounted. Requires Docker to be installed and the tunasync process user to be a member of the `docker` group.
+
+    ```toml
+    docker_image = "tunathu/tunasync-scripts:latest"
+    ```
+  </Accordion>
+
+  <Accordion title="docker_volumes">
+    Additional volume mounts passed to `docker run`. Each entry follows the standard Docker `host:container[:options]` format.
+
+    ```toml
+    docker_volumes = [
+      "/etc/misc/ftpsync.conf:/ftpsync/etc/ftpsync.conf:ro",
+      "/log/ftpsync:/home/log/tunasync/ftpsync",
+    ]
+    ```
+  </Accordion>
+
+  <Accordion title="docker_options">
+    Additional flags appended to the `docker run` command, for options not covered by `docker_volumes`.
+
+    ```toml
+    docker_options = ["--cpus", "20"]
+    ```
+  </Accordion>
+
+  <Accordion title="memory_limit">
+    Cap memory usage via cgroup when **not** using Docker. Accepts human-readable sizes such as `"256M"` or `"1G"`. When using Docker, control resources with `docker_options` instead.
+
+    ```toml
+    memory_limit = "512M"
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Environment variables
+
+tunasync sets the following environment variables for every command provider job. Scripts should read these instead of hard-coding paths.
+
+| Variable | Value |
+|---|---|
+| `TUNASYNC_MIRROR_NAME` | The mirror's `name` field |
+| `TUNASYNC_WORKING_DIR` | The local mirror directory (mirror_dir) |
+| `TUNASYNC_UPSTREAM_URL` | The mirror's `upstream` field |
+| `TUNASYNC_LOG_DIR` | Directory where log files are written |
+| `TUNASYNC_LOG_FILE` | Full path to the current job's log file |
+
+Any variables defined in `[mirrors.env]` are merged in after these defaults and may override them.
+
+## Examples from workers.conf
+
+<CodeGroup>
+
+```toml adobe-fonts (Docker + size_pattern)
+[[mirrors]]
+name = "adobe-fonts"
+interval = 1440
+provider = "command"
+upstream = "https://github.com/adobe-fonts"
+command = "/home/scripts/adobe-fonts.sh"
+size_pattern = "Total size is ([0-9\\.]+[KMGTP]?)"
+docker_image = "tunathu/tunasync-scripts:latest"
+```
+
+```toml dart-pub (Docker + env)
+[[mirrors]]
+name = "dart-pub"
+provider = "command"
+upstream = "https://pub.dev/api"
+command = "/home/scripts/pub.sh"
+interval = 30
+docker_image = "tunathu/pub-mirror:latest"
+
+[mirrors.env]
+MIRROR_BASE_URL = "https://mirrors.tuna.tsinghua.edu.cn/dart-pub"
+```
+
+```toml debian (Docker + volumes + env)
+[[mirrors]]
+name = "debian"
+provider = "command"
+upstream = "rsync://mirrors.tuna.tsinghua.edu.cn/debian/"
+command = "/home/scripts/debian.sh sync:archive:debian"
+size_pattern = "Total size is ([0-9\\.]+[KMGTP]?)"
+docker_image = "tunathu/ftpsync"
+docker_volumes = [
+  "/etc/misc/ftpsync-debian.conf:/ftpsync/etc/ftpsync-debian.conf:ro",
+  "/log/ftpsync:/home/log/tunasync/ftpsync",
+]
+
+[mirrors.env]
+FTPSYNC_LOG_DIR = "/home/log/tunasync/ftpsync"
+```
+
+```toml github-release (Docker + env + size_pattern)
+[[mirrors]]
+name = "github-release"
+provider = "command"
+upstream = "https://api.github.com/repos/"
+command = "/home/scripts/github-release.py --workers 5"
+size_pattern = "Total size is ([0-9\\.]+[KMGTP]?)"
+interval = 720
+docker_image = "tunathu/tunasync-scripts:latest"
+
+[mirrors.env]
+GITHUB_TOKEN = "xxxxx"
+```
+
+```toml chromiumos (fail_on_match)
+[[mirrors]]
+name = "chromiumos"
+interval = 720
+provider = "command"
+command = "/home/tunasync-scripts/cros.sh"
+upstream = "https://chromium.googlesource.com"
+size_pattern = "Total size is ([0-9\\.]+[KMGTP]?)"
+fail_on_match = "fatal: "
+docker_image = "tunathu/tunasync-scripts:latest"
+
+[mirrors.env]
+USE_BITMAP_INDEX = "1"
+CONCURRENT_JOBS = "20"
+```
+
+```toml nix-channels (docker_options)
+[[mirrors]]
+name = "nix-channels"
+interval = 300
+provider = "command"
+upstream = "https://nixos.org/channels"
+command = "timeout 20h /home/scripts/nix-channels.py"
+docker_image = "tunathu/nix-channels:latest"
+docker_options = [
+  "--cpus", "20",
+]
+```
+
+</CodeGroup>
+
+<Note>
+When `docker_image` is set, tunasync runs the command inside a container. The user running tunasync must belong to the `docker` group, or the job will fail with a permission error.
+</Note>

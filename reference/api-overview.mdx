@@ -1,0 +1,69 @@
+---
+title: "tunasync manager HTTP API: endpoints and response format"
+description: "tunasync manager exposes a JSON HTTP API on port 14242. Learn the base URL, authentication model, response format, and available endpoints."
+---
+
+The tunasync manager process exposes a JSON HTTP API used by both tunasync workers (to register themselves and report job status) and the `tunasynctl` command-line client (to list jobs, inspect workers, and send control commands). Every request and response body is JSON.
+
+## Base URL
+
+```
+http://<addr>:<port>
+```
+
+The default address is `http://127.0.0.1:14242`. You can override the bind address and port in the manager configuration file.
+
+## Authentication
+
+There is no authentication by default. To enable TLS, set `ssl_cert` and `ssl_key` in the manager configuration. When TLS is active the base URL uses `https://`.
+
+<Note>
+  `tunasynctl` automatically switches to `https://` when a CA certificate is supplied via `--ca-cert` or the `ca_cert` config key.
+</Note>
+
+## Response format
+
+All responses use `Content-Type: application/json`.
+
+**Success** — the body is either the requested data object/array or a confirmation envelope:
+
+```json
+{ "message": "..." }
+```
+
+**Error** — the body is an error envelope with an HTTP status code in the 4xx–5xx range:
+
+```json
+{ "error": "description of what went wrong" }
+```
+
+## Endpoint index
+
+| Method   | Path                              | Description                                        |
+| -------- | --------------------------------- | -------------------------------------------------- |
+| `GET`    | `/ping`                           | Health check — returns `{"message":"pong"}`        |
+| `GET`    | `/jobs`                           | List all mirror jobs across all workers            |
+| `DELETE` | `/jobs/disabled`                  | Remove all jobs with status `disabled` from the DB |
+| `GET`    | `/workers`                        | List all registered workers                        |
+| `POST`   | `/workers`                        | Register a new worker (called by worker on startup)|
+| `DELETE` | `/workers/:id`                    | Remove a worker by ID                              |
+| `GET`    | `/workers/:id/jobs`               | List jobs for a specific worker                    |
+| `POST`   | `/workers/:id/jobs/:job`          | Update the status of a mirror job (called by worker)|
+| `POST`   | `/workers/:id/jobs/:job/size`     | Update the stored size for a mirror                |
+| `POST`   | `/workers/:id/schedules`          | Update next-schedule times for a worker's jobs     |
+| `POST`   | `/cmd`                            | Send a control command to a worker's mirror job    |
+
+<Note>
+  Most endpoints are called internally by tunasync worker processes. The endpoints most relevant to operators and scripts are `/cmd`, `/jobs`, `/workers`, and `/jobs/disabled`. `tunasynctl` wraps all of these.
+</Note>
+
+## Learn more
+
+<CardGroup cols={2}>
+  <Card title="Workers endpoints" icon="server" href="/reference/api-workers">
+    `GET /workers`, `POST /workers`, `DELETE /workers/:id` — schemas and curl examples.
+  </Card>
+  <Card title="Jobs endpoints" icon="list" href="/reference/api-jobs">
+    `GET /jobs`, `POST /cmd`, `DELETE /jobs/disabled`, and more — schemas and curl examples.
+  </Card>
+</CardGroup>

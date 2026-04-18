@@ -1,0 +1,192 @@
+---
+title: "Deploy tunasync manager and worker as systemd services"
+description: "Set up tunasync manager and worker as systemd services, configure TLS for production, handle log rotation, and prepare your directory layout."
+---
+
+tunasync ships two independent binaries—`tunasync` (which runs both the manager and worker sub-commands) and `tunasynctl`—and is designed to run as long-lived daemons under systemd. The sections below walk through directory layout, the provided unit files, TLS configuration, and tips for running multiple workers on the same host.
+
+## Directory layout
+
+A conventional production installation uses the following directories:
+
+| Path | Purpose |
+|------|---------|
+| `/etc/tunasync/` | Configuration files (`manager.conf`, `worker.conf`) |
+| `/var/lib/tunasync/` | Persistent state (e.g. the BoltDB database file) |
+| `/run/tunasync/` | Runtime files including PID files |
+| `/var/log/tunasync/` | Log files written by mirror jobs |
+
+Create them before starting the services:
+
+```shell
+install -d -o tunasync -g tunasync /etc/tunasync
+install -d -o tunasync -g tunasync /var/lib/tunasync
+install -d -o tunasync -g tunasync /run/tunasync
+install -d -o tunasync -g tunasync /var/log/tunasync
+```
+
+## PID files
+
+Both processes write a PID file under `/run/tunasync/` by default:
+
+- **Manager:** `/run/tunasync/tunasync.manager.pid`
+- **Worker:** `/run/tunasync/tunasync.worker.pid`
+
+You can override either with the `--pidfile` flag when invoking the binary directly.
+
+## systemd unit files
+
+The repository ships two unit files under `systemd/`. Copy them to `/etc/systemd/system/` and adjust paths to match your installation.
+
+<CodeGroup>
+
+```ini tunasync-manager.service
+[Unit]
+Description = TUNA mirrors sync manager
+After=network.target
+Requires=network.target
+
+[Service]
+Type=simple
+User=tunasync
+ExecStart = /home/bin/tunasync manager -c /etc/tunasync/manager.conf --with-systemd
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```ini tunasync-worker.service
+[Unit]
+Description = TUNA mirrors sync worker
+After=network.target
+
+[Service]
+Type=simple
+User=tunasync
+PermissionsStartOnly=true
+ExecStartPre=/usr/bin/cgcreate -t tunasync -a tunasync -g memory:tunasync
+ExecStart=/home/bin/tunasync worker -c /etc/tunasync/worker.conf --with-systemd
+ExecReload=/bin/kill -SIGHUP $MAINPID
+ExecStopPost=/usr/bin/cgdelete memory:tunasync
+
+[Install]
+WantedBy=multi-user.target
+```
+
+</CodeGroup>
+
+<Note>
+The worker unit file above includes cgroup v1 setup via `cgcreate`/`cgdelete`. If you are not using cgroup memory limiting, remove the `ExecStartPre` and `ExecStopPost` lines. See [cgroup integration](/operations/cgroup) for details.
+</Note>
+
+The `--with-systemd` flag switches the logger to a format compatible with journald (no timestamps, log-level prefixes). Output is captured by `journalctl` automatically.
+
+## Managing services
+
+<Steps>
+  <Step title="Install and reload systemd">
+    ```shell
+    cp tunasync-manager.service tunasync-worker.service /etc/systemd/system/
+    systemctl daemon-reload
+    ```
+  </Step>
+  <Step title="Enable services to start on boot">
+    ```shell
+    systemctl enable tunasync-manager
+    systemctl enable tunasync-worker
+    ```
+  </Step>
+  <Step title="Start the services">
+    ```shell
+    systemctl start tunasync-manager
+    systemctl start tunasync-worker
+    ```
+  </Step>
+  <Step title="Check status">
+    ```shell
+    systemctl status tunasync-manager
+    systemctl status tunasync-worker
+    journalctl -u tunasync-worker -f
+    ```
+  </Step>
+</Steps>
+
+### Stopping and reloading
+
+```shell
+# Stop a service
+systemctl stop tunasync-worker
+
+# Hot-reload worker mirror config (sends SIGHUP)
+systemctl reload tunasync-worker
+```
+
+Sending `SIGHUP` to the worker process causes it to re-read the configuration file and apply any changes to the mirror list without stopping running sync jobs. The `ExecReload=/bin/kill -SIGHUP $MAINPID` directive in the unit file wires `systemctl reload` to this signal.
+
+## TLS configuration
+
+When the manager and one or more workers run on different hosts, encrypt the HTTP API with TLS.
+
+<Steps>
+  <Step title="Generate a self-signed certificate">
+    ```shell
+    openssl req -x509 -newkey rsa:4096 -keyout /etc/tunasync/manager.key \
+      -out /etc/tunasync/manager.crt -days 3650 -nodes \
+      -subj "/CN=tunasync-manager"
+    chown tunasync:tunasync /etc/tunasync/manager.key /etc/tunasync/manager.crt
+    chmod 600 /etc/tunasync/manager.key
+    ```
+  </Step>
+  <Step title="Configure the manager to use the certificate">
+    ```toml
+    [server]
+    addr = "0.0.0.0"
+    port = 12345
+    ssl_cert = "/etc/tunasync/manager.crt"
+    ssl_key  = "/etc/tunasync/manager.key"
+    ```
+  </Step>
+  <Step title="Configure the worker to trust the CA">
+    ```toml
+    [manager]
+    api_base = "https://manager.example.com:12345"
+    ca_cert  = "/etc/tunasync/manager.crt"
+    ```
+  </Step>
+</Steps>
+
+<Tip>
+If the manager and all workers run on the same machine, leave `ssl_cert`, `ssl_key`, and `ca_cert` empty and use `http://` in `api_base`. TLS is only necessary for cross-host deployments.
+</Tip>
+
+## Running multiple workers
+
+Each worker must have a unique `name`, `listen_port`, and configuration file. A common pattern is to name unit files after the worker:
+
+```shell
+cp tunasync-worker.service /etc/systemd/system/tunasync-worker-rsync.service
+cp tunasync-worker.service /etc/systemd/system/tunasync-worker-scripts.service
+```
+
+Then edit each unit's `ExecStart` to point to its own config file:
+
+```ini
+ExecStart=/home/bin/tunasync worker -c /etc/tunasync/worker-rsync.conf --with-systemd
+```
+
+Each `worker.conf` must specify a unique `[global] name` and unique `[server] listen_port` so the manager can distinguish them.
+
+## Log rotation
+
+Mirror job logs are written to the directory specified by `log_dir` in `worker.conf` (which supports Go template syntax, e.g. `/var/log/tunasync/{{.Name}}`). Add a logrotate rule to prevent unbounded growth:
+
+```ini
+/var/log/tunasync/*/*.log {
+    daily
+    rotate 7
+    compress
+    missingok
+    notifempty
+    sharedscripts
+}
+```

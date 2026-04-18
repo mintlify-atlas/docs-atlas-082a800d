@@ -1,0 +1,177 @@
+---
+title: "Run tunasync mirror sync scripts in Docker containers"
+description: "Use Docker containers to isolate mirror sync scripts in tunasync. Configure docker_image, volumes, options per mirror, and global Docker settings."
+---
+
+tunasync's Docker integration lets you run mirror sync scripts inside reproducible containers, providing a consistent environment for each job regardless of what is installed on the host. When a mirror specifies a `docker_image`, tunasync launches a `docker run` command that mounts the working directory and log paths into the container, executes the configured command, and waits for the container to exit. The cgroup hook is skipped for Docker-based jobs; memory limiting is handled via `docker run --memory` instead.
+
+## Prerequisites
+
+The system user running tunasync (typically `tunasync`) must be a member of the `docker` group:
+
+```shell
+usermod -aG docker tunasync
+```
+
+Log out and back in (or restart the systemd service) for the group change to take effect.
+
+## Global Docker configuration
+
+The `[docker]` section in `worker.conf` applies to all mirrors that use a `docker_image`. Individual mirrors can extend these settings.
+
+```toml
+# /home/scripts in this example points to https://github.com/tuna/tunasync-scripts/
+
+[docker]
+enable  = true
+volumes = []
+options = []
+```
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `enable` | bool | Enable Docker support globally. Must be `true` for any mirror to use `docker_image`. |
+| `volumes` | list of strings | Volume mounts appended to every Docker job, in `host:container[:options]` format. |
+| `options` | list of strings | Extra `docker run` arguments appended to every Docker job. |
+
+## Per-mirror Docker configuration
+
+Each `[[mirrors]]` entry can specify its own image, additional volumes, and additional options:
+
+```toml
+[[mirrors]]
+name         = "my-mirror"
+provider     = "command"
+upstream     = "https://example.com/"
+command      = "/home/scripts/my-mirror.sh"
+docker_image = "tunathu/tunasync-scripts:latest"
+docker_volumes = [
+  "/etc/misc/config.conf:/config.conf:ro",
+]
+docker_options = [
+  "--cpus", "4",
+]
+```
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `docker_image` | string | Container image to use. When set, the job runs inside Docker. |
+| `docker_volumes` | list of strings | Additional volume mounts for this mirror, merged with global `volumes`. |
+| `docker_options` | list of strings | Additional `docker run` flags for this mirror, merged with global `options`. |
+
+## How tunasync runs the container
+
+Before executing the sync command, tunasync's Docker hook mounts three paths into the container automatically:
+
+- **`log_dir`** → same path inside the container
+- **`log_file`** → same path inside the container
+- **`working_dir`** → same path inside the container
+
+These automatic mounts are added in addition to any volumes from `[docker].volumes` and `docker_volumes`. The sync command then runs as the container's default user with access to all mounted paths.
+
+After the command exits, tunasync polls `docker ps` until the container is removed (up to 10 retries with 1-second delays). If the container is not cleaned up within that window, a warning is logged and the next sync run may fail.
+
+<Note>
+Container names follow the pattern `tunasync-job-<mirror-name>`. If a previous container with that name still exists when a new sync starts, Docker will return an error. Always ensure containers are removed after each run (the default for most tunasync script images).
+</Note>
+
+## Real-world examples
+
+The following examples are taken from the reference `workers.conf`.
+
+<AccordionGroup>
+  <Accordion title="adobe-fonts — simple command provider">
+    A minimal Docker job with no extra volumes or options. The image provides everything the script needs:
+
+    ```toml
+    [[mirrors]]
+    name         = "adobe-fonts"
+    interval     = 1440
+    provider     = "command"
+    upstream     = "https://github.com/adobe-fonts"
+    command      = "/home/scripts/adobe-fonts.sh"
+    size_pattern = "Total size is ([0-9\\.]+[KMGTP]?)"
+    docker_image = "tunathu/tunasync-scripts:latest"
+    ```
+  </Accordion>
+
+  <Accordion title="debian — extra volumes for ftpsync config">
+    The `debian` mirror mounts a read-only ftpsync configuration file and a separate log directory into the container:
+
+    ```toml
+    [[mirrors]]
+    name         = "debian"
+    provider     = "command"
+    upstream     = "rsync://mirrors.tuna.tsinghua.edu.cn/debian/"
+    command      = "/home/scripts/debian.sh sync:archive:debian"
+    size_pattern = "Total size is ([0-9\\.]+[KMGTP]?)"
+    docker_image = "tunathu/ftpsync"
+    docker_volumes = [
+      "/etc/misc/ftpsync-debian.conf:/ftpsync/etc/ftpsync-debian.conf:ro",
+      "/log/ftpsync:/home/log/tunasync/ftpsync",
+    ]
+
+    [mirrors.env]
+    FTPSYNC_LOG_DIR = "/home/log/tunasync/ftpsync"
+    ```
+  </Accordion>
+
+  <Accordion title="nix-channels — extra docker_options">
+    The `nix-channels` mirror uses `docker_options` to cap CPU usage:
+
+    ```toml
+    [[mirrors]]
+    name     = "nix-channels"
+    interval = 300
+    provider = "command"
+    upstream = "https://nixos.org/channels"
+    command  = "timeout 20h /home/scripts/nix-channels.py"
+    docker_image    = "tunathu/nix-channels:latest"
+    docker_options  = [
+      "--cpus", "20",
+    ]
+    ```
+  </Accordion>
+
+  <Accordion title="rustup — image with empty volume and option lists">
+    Explicit empty lists are valid and equivalent to omitting the field:
+
+    ```toml
+    [[mirrors]]
+    name         = "rustup"
+    provider     = "command"
+    upstream     = "https://rustup.rs/"
+    command      = "/home/scripts/rustup.sh"
+    interval     = 1440
+    docker_image    = "tunathu/rustup-mirror:latest"
+    docker_volumes  = []
+    docker_options  = []
+
+    [mirrors.env]
+    MIRROR_BASE_URL = "https://mirrors.tuna.tsinghua.edu.cn/rustup"
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Memory limiting with Docker
+
+When a mirror sets `memory_limit` and uses a `docker_image`, tunasync passes the value directly to `docker run --memory`:
+
+```toml
+[[mirrors]]
+name         = "large-mirror"
+provider     = "command"
+command      = "/home/scripts/large-mirror.sh"
+docker_image = "tunathu/tunasync-scripts:latest"
+memory_limit = "512M"
+```
+
+This is equivalent to running:
+
+```shell
+docker run --memory=512m ... tunathu/tunasync-scripts:latest /home/scripts/large-mirror.sh
+```
+
+<Note>
+The cgroup hook is not used when `docker_image` is set. Docker's own resource management enforces the `memory_limit`. You do not need `[cgroup] enable = true` for Docker-based jobs.
+</Note>

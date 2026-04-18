@@ -1,0 +1,278 @@
+---
+title: "tunasynctl CLI: complete command and flag reference"
+description: "Full reference for the tunasynctl CLI. Commands: list, workers, start, stop, disable, restart, reload, flush, rm-worker, set-size, ping."
+---
+
+`tunasynctl` is the control client for managing a running tunasync deployment. It communicates with the manager's HTTP API to query job status, send commands to workers, and perform administrative operations such as removing workers or flushing disabled jobs.
+
+**Global synopsis**
+
+```bash
+tunasynctl [global flags] <command> [command flags] [arguments]
+tunasynctl --version
+tunasynctl --help
+```
+
+Configuration is read from the following locations, in order, with later sources taking precedence:
+
+1. `/etc/tunasync/ctl.conf` (system-wide)
+2. `~/.config/tunasync/ctl.conf` (user-specific)
+3. The file specified by `--config` / `-c`
+4. Command-line flags
+
+## Global flags
+
+All subcommands accept these flags in addition to their own.
+
+<ParamField path="--config" type="string">
+  Read configuration from `FILE` instead of the default config file locations. Short form: `-c`.
+</ParamField>
+
+<ParamField path="--manager" type="string">
+  Manager server address (`ADDR`). Overrides `manager_addr` from the config file. Short form: `-m`.
+</ParamField>
+
+<ParamField path="--port" type="number">
+  Manager server port. Overrides `manager_port` from the config file. Short form: `-p`.
+</ParamField>
+
+<ParamField path="--ca-cert" type="string">
+  Path to a trusted root CA certificate file (`CERT`) for TLS verification. When set, HTTPS is used.
+</ParamField>
+
+<ParamField path="--verbose" type="boolean">
+  Enable verbose logging. Short form: `-v`.
+</ParamField>
+
+<ParamField path="--debug" type="boolean">
+  Enable debug-level logging.
+</ParamField>
+
+## Commands
+
+### `list` — List jobs of workers
+
+List mirror job status. Without `--all`, you must provide at least one worker ID as a positional argument.
+
+```bash
+tunasynctl list [--all] [--status STATUS] [--format TEMPLATE] [worker...]
+```
+
+<ParamField path="--all" type="boolean">
+  List jobs from all registered workers instead of specific ones. Short form: `-a`.
+</ParamField>
+
+<ParamField path="--status" type="string">
+  Filter output to jobs matching the given status or statuses. Accepts a comma-separated list. Short form: `-s`.
+</ParamField>
+
+<ParamField path="--format" type="string">
+  Format output using a Go template string instead of JSON. Short form: `-f`.
+</ParamField>
+
+<ParamField path="worker" type="string">
+  One or more worker IDs to query (positional arguments). Required unless `--all` is set.
+</ParamField>
+
+```bash
+# List all jobs across all workers
+tunasynctl list --all
+
+# List jobs for a specific worker
+tunasynctl list worker1
+
+# List jobs for multiple workers in parallel
+tunasynctl list worker1 worker2
+
+# Filter by status
+tunasynctl list --all --status failed,syncing
+
+# Custom output format using a Go template
+tunasynctl list --all --format '{{.Name}}: {{.Status}}'
+```
+
+---
+
+### `workers` — List registered workers
+
+List all workers currently registered with the manager, including their status information.
+
+```bash
+tunasynctl workers
+```
+
+---
+
+### `start` — Start a mirror job
+
+Send a start command to a specific mirror job on a worker. Optionally override the worker's concurrent job limit.
+
+```bash
+tunasynctl start -w WORKER [--force] <mirror>
+```
+
+<ParamField path="--worker" type="string" required>
+  Worker ID to send the command to. Short form: `-w`.
+</ParamField>
+
+<ParamField path="--force" type="boolean">
+  Override the worker's concurrent job limit and start the job immediately. Short form: `-f`.
+</ParamField>
+
+```bash
+tunasynctl start -w worker1 ubuntu
+tunasynctl start -w worker1 --force debian
+```
+
+---
+
+### `stop` — Stop a mirror job
+
+Send a stop command to a mirror job. The job's status will be set to `Paused`; its sync goroutine continues running but will not start new syncs.
+
+```bash
+tunasynctl stop -w WORKER <mirror>
+```
+
+<ParamField path="--worker" type="string" required>
+  Worker ID to send the command to. Short form: `-w`.
+</ParamField>
+
+```bash
+tunasynctl stop -w worker1 ubuntu
+```
+
+---
+
+### `disable` — Disable a mirror job
+
+Disable a mirror job. The job's sync goroutine is stopped and its status is set to `Disabled`. The job record persists in the database until flushed.
+
+```bash
+tunasynctl disable -w WORKER <mirror>
+```
+
+<ParamField path="--worker" type="string" required>
+  Worker ID to send the command to. Short form: `-w`.
+</ParamField>
+
+```bash
+tunasynctl disable -w worker1 ubuntu
+```
+
+---
+
+### `restart` — Restart a mirror job
+
+Send a restart command to a mirror job, causing it to re-run the sync immediately.
+
+```bash
+tunasynctl restart -w WORKER <mirror>
+```
+
+<ParamField path="--worker" type="string" required>
+  Worker ID to send the command to. Short form: `-w`.
+</ParamField>
+
+```bash
+tunasynctl restart -w worker1 ubuntu
+```
+
+---
+
+### `reload` — Reload worker configuration
+
+Tell a worker to reload its configuration file — the equivalent of sending `SIGHUP` directly to the worker process.
+
+```bash
+tunasynctl reload -w WORKER
+```
+
+<ParamField path="--worker" type="string" required>
+  Worker ID to send the reload command to. Short form: `-w`.
+</ParamField>
+
+```bash
+tunasynctl reload -w worker1
+```
+
+<Tip>
+  Use `reload` after updating a worker's config file to apply changes without restarting the worker process.
+</Tip>
+
+---
+
+### `flush` — Flush disabled jobs
+
+Remove all jobs with `Disabled` status from the manager database. This is a destructive operation that permanently deletes the records.
+
+```bash
+tunasynctl flush
+```
+
+<Warning>
+  `flush` permanently removes all disabled job records from the database. Disable individual jobs with `disable` before using this command if you want to selectively clean up.
+</Warning>
+
+---
+
+### `rm-worker` — Remove a worker registration
+
+Deregister a worker from the manager. The worker record and all its associated jobs are removed.
+
+```bash
+tunasynctl rm-worker -w WORKER
+```
+
+<ParamField path="--worker" type="string" required>
+  Worker ID of the worker to remove. Short form: `-w`.
+</ParamField>
+
+```bash
+tunasynctl rm-worker -w worker1
+```
+
+---
+
+### `set-size` — Update stored mirror size
+
+Manually set the recorded disk size for a mirror. Accepts any size string (the manager stores it as-is without parsing).
+
+```bash
+tunasynctl set-size -w WORKER <mirror> <size>
+```
+
+<ParamField path="--worker" type="string" required>
+  Worker ID that owns the mirror job. Short form: `-w`.
+</ParamField>
+
+<ParamField path="mirror" type="string">
+  Name of the mirror to update (positional argument).
+</ParamField>
+
+<ParamField path="size" type="string">
+  Size value to store, for example `120G` or `1.5T` (positional argument).
+</ParamField>
+
+```bash
+tunasynctl set-size -w worker1 ubuntu 120G
+tunasynctl set-size -w worker1 debian 1.5T
+```
+
+---
+
+### `ping` — Ping a mirror job goroutine
+
+Send a ping command to a mirror job goroutine to check that it is alive and responsive.
+
+```bash
+tunasynctl ping -w WORKER <mirror>
+```
+
+<ParamField path="--worker" type="string">
+  Worker ID to send the ping to. Short form: `-w`.
+</ParamField>
+
+```bash
+tunasynctl ping -w worker1 ubuntu
+```

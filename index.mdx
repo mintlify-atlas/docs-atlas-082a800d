@@ -1,97 +1,60 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "tunasync: distributed mirror job management system"
+description: "tunasync is a distributed mirror synchronization system used by TUNA mirrors. Manage rsync, command, and two-stage sync jobs across multiple workers."
 ---
 
-## Setting up
+tunasync is the mirror job management system powering [TUNA mirrors](https://mirrors.tuna.tsinghua.edu.cn), one of the largest open-source software mirrors in China. It provides a manager-worker architecture where a central manager coordinates sync schedules and status across one or more worker processes, each running configurable mirror jobs using rsync, custom commands, or two-stage rsync providers.
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Deploy a working manager and worker in minutes with a minimal configuration example.
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Architecture" icon="diagram-project" href="/architecture">
+    Understand the manager-worker design, job lifecycle, and HTTP API communication model.
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Configuration" icon="sliders" href="/configuration/manager">
+    Configure the manager server, worker processes, mirrors, and the tunasynctl client.
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="Providers" icon="arrows-rotate" href="/providers/rsync">
+    Learn about the three sync providers: rsync, two-stage rsync, and custom command.
   </Card>
-</Columns>
+  <Card title="Operations" icon="terminal" href="/operations/job-management">
+    Manage running jobs, reload configs, handle failures, and set up systemd services.
+  </Card>
+  <Card title="CLI Reference" icon="square-terminal" href="/reference/tunasynctl-cli">
+    Full reference for the tunasynctl control client and the tunasync daemon CLI.
+  </Card>
+</CardGroup>
 
-## Create beautiful pages
+## How it works
 
-Everything you need to create world-class documentation.
+tunasync splits responsibilities between two components: the **manager** and the **worker**. The manager is a stateful HTTP server that tracks job status in a local database (BoltDB, Badger, LevelDB, or Redis). Workers register themselves on startup, then execute mirror jobs on a configurable schedule, reporting status back to the manager after each run.
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+<Steps>
+  <Step title="Start the manager">
+    Launch `tunasync manager` with a TOML config file. The manager exposes an HTTP API on port 14242 by default and stores job state in a BoltDB file.
+  </Step>
+  <Step title="Start one or more workers">
+    Launch `tunasync worker` on each sync host. Workers register with the manager, load their mirror configs, and begin scheduling jobs immediately.
+  </Step>
+  <Step title="Control jobs with tunasynctl">
+    Use `tunasynctl` to list job status, start or stop individual mirrors, reload configs, and manage workers — all without restarting any daemon.
+  </Step>
+</Steps>
 
-## Need inspiration?
+## Key features
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+<CardGroup cols={2}>
+  <Card title="Multiple sync providers" icon="layer-group">
+    rsync, two-stage rsync (for Debian-style repos), and arbitrary shell commands. Mix providers across mirrors in the same worker.
+  </Card>
+  <Card title="Resource isolation" icon="gauge">
+    Limit memory per mirror job using cgroup v1 or v2, or run jobs inside Docker containers for full isolation.
+  </Card>
+  <Card title="Atomic snapshots" icon="camera">
+    Btrfs and ZFS snapshot hooks create atomic mirror views so users never see partially-synced data.
+  </Card>
+  <Card title="Hot config reload" icon="rotate">
+    Send SIGHUP to a worker to reload mirror configurations without interrupting in-progress sync jobs.
+  </Card>
+</CardGroup>

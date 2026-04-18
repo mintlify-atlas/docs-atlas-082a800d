@@ -1,0 +1,156 @@
+---
+title: "Serve atomic mirror snapshots with Btrfs and ZFS hooks"
+description: "Enable Btrfs or ZFS snapshot hooks in tunasync to create atomic mirror views after each successful sync, preventing users from seeing partial data."
+---
+
+tunasync supports filesystem-level snapshot hooks for Btrfs and ZFS. After each successful sync, the hook creates (or updates) a snapshot of the mirror's working directory. Serving users from the snapshot rather than the live sync directory ensures they never see a mirror in a partially-synced state—every file visible to users reflects the last completed sync.
+
+## Btrfs snapshots
+
+The Btrfs hook manages subvolumes and snapshots on a Btrfs filesystem. On each successful sync it deletes the previous snapshot and creates a new writable one from the current state of the mirror subvolume.
+
+### How it works
+
+1. **Pre-job:** tunasync checks that the mirror's working directory exists as a Btrfs subvolume. If the directory does not exist, it creates a new subvolume at that path. If the path exists but is not a subvolume, the job fails with an error.
+2. **Post-success:** tunasync deletes the existing snapshot at `snapshot_path` (if any) and creates a new writable snapshot from the working directory. The snapshot is writable so that it can be deleted on the next sync cycle.
+3. **Post-failure:** the existing snapshot is left untouched, so users continue to see the last good state.
+
+### Global configuration
+
+Add a `[btrfs_snapshot]` section to `worker.conf` to enable Btrfs snapshots for all mirrors:
+
+```toml
+[btrfs_snapshot]
+enable        = true
+snapshot_path = "/data/publish"
+```
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `enable` | bool | Enable the Btrfs snapshot hook globally. |
+| `snapshot_path` | string | Default directory where snapshots are created. Each mirror gets a sub-path `<snapshot_path>/<mirror-name>`. |
+
+### Per-mirror snapshot path override
+
+A specific mirror can override the global `snapshot_path`:
+
+```toml
+[[mirrors]]
+name          = "elvish"
+provider      = "rsync"
+upstream      = "rsync://rsync.elv.sh/elvish/"
+interval      = 1440
+snapshot_path = "/data/publish/elvish"
+```
+
+When `snapshot_path` is set on a mirror entry it takes precedence over `<global_snapshot_path>/<mirror-name>`.
+
+### Full example
+
+```toml
+[btrfs_snapshot]
+enable        = true
+snapshot_path = "/data/publish"
+
+[[mirrors]]
+name     = "alpine"
+provider = "rsync"
+upstream = "rsync://rsync.alpinelinux.org/alpine/"
+# snapshot will be created at /data/publish/alpine
+
+[[mirrors]]
+name          = "elvish"
+provider      = "rsync"
+upstream      = "rsync://rsync.elv.sh/elvish/"
+snapshot_path = "/data/publish/elvish"
+# snapshot will be created at /data/publish/elvish (explicit override)
+```
+
+### Permission requirements
+
+If tunasync runs as a non-root user, that user must have write and execute permissions on both the mirror working directory and the snapshot directory. Additionally, the Btrfs partition must be mounted with the `user_subvol_rm_allowed` option so that non-root users can delete subvolumes:
+
+```shell
+# /etc/fstab
+UUID=<uuid>  /data  btrfs  defaults,user_subvol_rm_allowed  0  0
+```
+
+<Warning>
+Without `user_subvol_rm_allowed`, the post-success hook will fail to delete the old snapshot and the new snapshot cannot be created. The sync will complete but the snapshot will not be updated.
+</Warning>
+
+## ZFS snapshots
+
+The ZFS hook takes a ZFS snapshot after each successful sync. Each mirror's working directory must be a ZFS dataset (a mountpoint under the configured zpool).
+
+### How it works
+
+1. **Pre-job:** tunasync verifies that the mirror's working directory exists and is a mountpoint. If it is not, tunasync logs the commands needed to create the dataset and aborts the job.
+2. **Post-success:** a ZFS snapshot is taken of the mirror's dataset.
+
+The dataset name is derived from the zpool and the mirror name:
+
+```
+<zpool>/<mirror-name>
+```
+
+Both are converted to lowercase. For example, with `zpool = "data"` and a mirror named `Ubuntu`, the dataset is `data/ubuntu`.
+
+### Setup
+
+Create a ZFS dataset for each mirror before starting the worker:
+
+```shell
+zfs create data/alpine
+zfs set mountpoint=/srv/tunasync/alpine data/alpine
+# if running as non-root:
+chown tunasync /srv/tunasync/alpine
+```
+
+### Configuration
+
+```toml
+[zfs]
+enable = true
+zpool  = "data"
+```
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `enable` | bool | Enable the ZFS snapshot hook globally. |
+| `zpool` | string | Name of the ZFS pool that contains the mirror datasets. |
+
+### Example
+
+```toml
+[global]
+name       = "mirror_worker"
+mirror_dir = "/srv/tunasync"
+
+[zfs]
+enable = true
+zpool  = "data"
+
+[[mirrors]]
+name     = "alpine"
+provider = "rsync"
+upstream = "rsync://rsync.alpinelinux.org/alpine/"
+# dataset: data/alpine  mountpoint: /srv/tunasync/alpine
+```
+
+## Choosing between Btrfs and ZFS
+
+<Tabs>
+  <Tab title="Btrfs">
+    - Snapshots are per-mirror and stored at a configurable path, which can be a different directory from the sync directory (e.g. on a different subvolume served by your web server).
+    - The per-mirror `snapshot_path` override gives fine-grained control over where each snapshot is placed.
+    - Requires the partition to be formatted as Btrfs and mounted with `user_subvol_rm_allowed` for non-root use.
+    - Each mirror's working directory must itself be a Btrfs subvolume.
+  </Tab>
+  <Tab title="ZFS">
+    - Snapshots are taken at the ZFS dataset level. Each mirror's working directory must be a separate ZFS dataset within the configured zpool.
+    - No per-mirror path override is available; snapshot naming is `<zpool>/<mirror-name>@<timestamp>` as managed by ZFS.
+    - Well-suited to environments that already use ZFS for storage, where dataset-per-mirror is a natural layout.
+    - Non-root use requires appropriate ZFS delegation (`zfs allow`).
+  </Tab>
+</Tabs>

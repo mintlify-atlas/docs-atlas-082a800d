@@ -1,0 +1,106 @@
+{
+  "projectType": "infrastructure",
+  "projectName": "tunasync",
+  "projectDescription": "A distributed mirror job management system with a central manager, worker daemons, and a CLI control client for operating large-scale software mirrors.",
+  "theme": "aspen",
+  "primaryColor": "#bc574b",
+  "lightColor": "#f9f9f2",
+  "darkColor": "#44535c",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "architecture"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "configuration/manager",
+              "configuration/worker",
+              "configuration/mirrors",
+              "configuration/tunasynctl"
+            ]
+          },
+          {
+            "group": "Providers",
+            "pages": [
+              "providers/rsync",
+              "providers/two-stage-rsync",
+              "providers/command"
+            ]
+          },
+          {
+            "group": "Operations",
+            "pages": [
+              "operations/deployment",
+              "operations/job-management",
+              "operations/cgroup",
+              "operations/docker",
+              "operations/btrfs-zfs"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Reference",
+        "groups": [
+          {
+            "group": "CLI Reference",
+            "pages": [
+              "reference/tunasync-cli",
+              "reference/tunasynctl-cli"
+            ]
+          },
+          {
+            "group": "Manager API",
+            "pages": [
+              "reference/api-overview",
+              "reference/api-workers",
+              "reference/api-jobs"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Manager-worker architecture for distributed mirror synchronization",
+    "Three sync providers: rsync, two-stage-rsync, and custom command",
+    "HTTP/HTTPS API between manager and workers with optional TLS",
+    "Multiple database backends: BoltDB, Badger, LevelDB, Redis",
+    "cgroup v1/v2 support for resource limiting of sync jobs",
+    "Docker container support for running mirror scripts in isolation",
+    "Btrfs snapshot and ZFS snapshot hooks for atomic mirror updates",
+    "Hot config reload via SIGHUP without stopping sync jobs",
+    "tunasynctl CLI for live job control: start, stop, disable, restart, reload",
+    "systemd service integration with journald-compatible logging"
+  ],
+  "publicApiSurface": [
+    "GET /jobs — list all mirror jobs across all workers",
+    "DELETE /jobs/disabled — flush all disabled jobs",
+    "GET /workers — list all registered workers",
+    "POST /workers — register a worker",
+    "DELETE /workers/:id — remove a worker",
+    "GET /workers/:id/jobs — list jobs for a specific worker",
+    "POST /workers/:id/jobs/:job — update job status",
+    "POST /workers/:id/jobs/:job/size — update mirror size",
+    "POST /workers/:id/schedules — update job schedules",
+    "POST /cmd — send control commands (start/stop/disable/restart/reload/ping)",
+    "tunasync manager — start the manager server",
+    "tunasync worker — start a worker process",
+    "tunasynctl list — list mirror jobs",
+    "tunasynctl workers — list workers",
+    "tunasynctl start/stop/disable/restart — control mirror jobs",
+    "tunasynctl reload — hot-reload worker configuration",
+    "tunasynctl set-size — manually update mirror size",
+    "tunasynctl rm-worker — remove a worker",
+    "tunasynctl flush — flush disabled jobs"
+  ]
+}

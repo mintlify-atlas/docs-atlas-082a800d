@@ -1,0 +1,158 @@
+---
+title: "tunasync CLI: manager and worker subcommand reference"
+description: "Full reference for the tunasync command. Start the manager or worker daemon with config file, TLS options, debug/verbose flags, and pid file paths."
+---
+
+`tunasync` is the main daemon binary for the tunasync mirror synchronization system. It has two subcommands — `manager` and `worker` — each of which runs as a long-lived process. The manager coordinates workers and exposes an HTTP API; each worker runs on a mirror host and executes the configured sync jobs.
+
+**Global synopsis**
+
+```bash
+tunasync [command] [flags]
+tunasync --version
+tunasync --help
+```
+
+## Subcommands
+
+<Tabs>
+  <Tab title="manager">
+
+### `tunasync manager`
+
+Start the tunasync manager daemon. The manager maintains the job database, exposes the control API, and dispatches commands to registered workers.
+
+```bash
+tunasync manager [flags]
+tunasync m [flags]
+```
+
+<ParamField path="--config" type="string">
+  Path to the manager configuration `FILE`. Short form: `-c`.
+</ParamField>
+
+<ParamField path="--addr" type="string">
+  The address (`ADDR`) the manager HTTP server will listen on.
+</ParamField>
+
+<ParamField path="--port" type="number">
+  The TCP port (`PORT`) the manager will bind to.
+</ParamField>
+
+<ParamField path="--cert" type="string">
+  Path to the TLS certificate `FILE` used to enable HTTPS.
+</ParamField>
+
+<ParamField path="--key" type="string">
+  Path to the TLS private key `FILE` paired with `--cert`.
+</ParamField>
+
+<ParamField path="--db-file" type="string">
+  Path to the database `FILE` used to persist mirror state.
+</ParamField>
+
+<ParamField path="--db-type" type="string">
+  Database backend `TYPE` (e.g. `bolt`).
+</ParamField>
+
+<ParamField path="--verbose" type="boolean">
+  Enable verbose logging output. Short form: `-v`.
+</ParamField>
+
+<ParamField path="--debug" type="boolean">
+  Run the manager in debug mode (enables gin debug routes and detailed logs).
+</ParamField>
+
+<ParamField path="--with-systemd" type="boolean">
+  Enable systemd-compatible log formatting (suppresses timestamps, uses journal priority prefixes).
+</ParamField>
+
+<ParamField path="--pidfile" type="string" default="/run/tunasync/tunasync.manager.pid">
+  Path to write the manager process PID file.
+</ParamField>
+
+### Examples
+
+```bash
+# Start with a config file
+tunasync manager -c /etc/tunasync/manager.conf
+
+# Start with inline TLS and debug logging
+tunasync manager --addr 0.0.0.0 --port 14242 \
+  --cert /etc/ssl/tunasync.crt --key /etc/ssl/tunasync.key \
+  --debug
+
+# Run under systemd (journald-compatible output)
+tunasync manager -c /etc/tunasync/manager.conf --with-systemd
+```
+
+  </Tab>
+  <Tab title="worker">
+
+### `tunasync worker`
+
+Start a tunasync worker daemon. The worker registers with the manager, then executes mirror sync jobs according to its configuration file.
+
+```bash
+tunasync worker [flags]
+tunasync w [flags]
+```
+
+<ParamField path="--config" type="string">
+  Path to the worker configuration `FILE`. Short form: `-c`.
+</ParamField>
+
+<ParamField path="--verbose" type="boolean">
+  Enable verbose logging output. Short form: `-v`.
+</ParamField>
+
+<ParamField path="--debug" type="boolean">
+  Run the worker in debug mode (enables detailed gin and sync logs).
+</ParamField>
+
+<ParamField path="--with-systemd" type="boolean">
+  Enable systemd-compatible log formatting for use with journald.
+</ParamField>
+
+<ParamField path="--pidfile" type="string" default="/run/tunasync/tunasync.worker.pid">
+  Path to write the worker process PID file.
+</ParamField>
+
+<ParamField path="--prof-path" type="string">
+  Directory path for Go CPU profiling output. The path must exist and be a directory. Profiling is disabled when this flag is empty (the default).
+</ParamField>
+
+### Examples
+
+```bash
+# Start with a config file
+tunasync worker -c /etc/tunasync/worker.conf
+
+# Start with verbose output under systemd
+tunasync worker -c /etc/tunasync/worker.conf --with-systemd --verbose
+
+# Start with CPU profiling enabled
+tunasync worker -c /etc/tunasync/worker.conf --prof-path /var/log/tunasync/prof
+```
+
+  </Tab>
+</Tabs>
+
+## Signal handling
+
+The worker process installs signal handlers after a one-second startup delay.
+
+| Signal              | Behavior                                                                                                   |
+| ------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `SIGHUP`            | Reload mirror configuration from the config file specified by `--config`. Running jobs are not interrupted. |
+| `SIGINT`, `SIGTERM` | Graceful shutdown — calls `Halt()` to stop the worker cleanly.                                             |
+
+<Note>
+  Signal handling applies to the `worker` subcommand only. The `manager` daemon does not install the same signal handlers.
+</Note>
+
+To trigger a live config reload without restarting the worker:
+
+```bash
+kill -HUP $(cat /run/tunasync/tunasync.worker.pid)
+```

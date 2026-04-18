@@ -1,0 +1,134 @@
+---
+title: "tunasync architecture: manager, worker, and job lifecycle"
+description: "Learn how tunasync's manager-worker model works, how mirror jobs are scheduled and executed, and how components communicate over HTTP."
+---
+
+tunasync uses a manager-worker architecture where a single central manager coordinates state across one or more workers, each of which runs the actual sync jobs. The three pieces — manager, worker, and the `tunasynctl` control client — communicate exclusively over HTTP (or HTTPS for encrypted deployments). No shared filesystem, message broker, or external coordinator is required.
+
+## ASCII architecture diagram
+
+The following diagram is reproduced from the tunasync source repository and shows the high-level structure:
+
+```text
+# Architecture
+
+- Manager: Central instance for status and job management
+- Worker: Runs mirror jobs
+
++------------+ +---+                  +---+
+| Client API | |   |    Job Status    |   |    +----------+     +----------+
++------------+ |   +----------------->|   |--->|  mirror  +---->|  mirror  |
++------------+ |   |                  | w |    |  config  |     | provider |
+| Worker API | | H |                  | o |    +----------+     +----+-----+
++------------+ | T |   Job Control    | r |                          |
++------------+ | T +----------------->| k |       +------------+     |
+| Job/Status | | P |   Start/Stop/... | e |       | mirror job |<----+
+| Management | | S |                  | r |       +------^-----+
++------------+ |   |   Update Status  |   |    +---------+---------+
++------------+ |   <------------------+   |    |     Scheduler     |
+|   BoltDB   | |   |                  |   |    +-------------------+
++------------+ +---+                  +---+
+```
+
+## Manager
+
+The manager is the authoritative source of truth for job state. It is an HTTP server built with the [Gin](https://github.com/gin-gonic/gin) framework and backed by a persistent key-value database. The default database backend is BoltDB; Badger, LevelDB, and Redis are also supported and selectable via the `db_type` config field.
+
+The manager exposes two groups of HTTP endpoints:
+
+- **Worker API** — Workers call these endpoints to register themselves (`POST /workers`), report job status updates (`POST /workers/:id/jobs/:job`), and push schedule information (`POST /workers/:id/schedules`). The manager uses these updates to keep its database in sync with what workers are actually doing.
+- **Client API** — `tunasynctl` calls these endpoints to list jobs (`GET /jobs`), list workers (`GET /workers`), and send control commands (`POST /cmd`). When the manager receives a command from the client, it looks up the target worker's URL and forwards a `WorkerCmd` message to that worker's own HTTP server.
+
+The manager does not execute any sync logic itself. It is a coordination and state-storage layer.
+
+## Worker
+
+Each worker is an independent daemon that runs on a sync host. On startup it:
+
+1. Reads its TOML configuration file to load mirror definitions.
+2. Registers itself with the manager via `POST /workers`, providing its own HTTP listen address.
+3. Instantiates a goroutine and a scheduler for each mirror job.
+4. Begins scheduling jobs according to each mirror's `interval` setting.
+
+The worker's built-in HTTP server listens for `WorkerCmd` messages forwarded by the manager. When a command arrives (e.g., `start`, `stop`, `disable`, `restart`), the worker acts on the appropriate job goroutine.
+
+After each job run the worker reports the new job state back to the manager at `POST /workers/:id/jobs/:job`. The manager records the updated `SyncStatus`, `last_update`, `last_started`, `last_ended`, and any error message.
+
+## tunasynctl
+
+`tunasynctl` is a thin CLI client. It sends a `ClientCmd` JSON payload to the manager's `POST /cmd` endpoint, specifying the target worker ID, the mirror ID, and the verb (`start`, `stop`, `disable`, `restart`, `ping`, or `reload`). The manager translates this into a `WorkerCmd` and forwards it to the correct worker.
+
+This means you can control any worker from any machine that can reach the manager — you do not need shell access to the worker host.
+
+## Communication flow
+
+A typical operator interaction follows this path:
+
+1. **Worker registers** — On startup, the worker posts its ID and listen URL to `POST /workers`. The manager stores the worker record.
+2. **Manager tracks status** — As jobs run, workers post status updates. The manager writes them to the database and returns the updated record.
+3. **Operator sends command** — `tunasynctl` posts a `ClientCmd` to `POST /cmd` on the manager.
+4. **Manager forwards to worker** — The manager looks up the worker's URL, applies any immediate state change (e.g., marking the job `paused` on `stop`, or `disabled` on `disable`), then POSTs a `WorkerCmd` to the worker.
+5. **Worker acts** — The worker goroutine receives the command and changes the job's runtime behaviour accordingly.
+
+## Job lifecycle
+
+Every mirror job has a `SyncStatus` value. The possible states, defined in `internal/status.go`, are:
+
+| State | Description |
+|---|---|
+| `none` | Job registered but never started |
+| `pre-syncing` | Pre-job hooks are running before the main sync |
+| `syncing` | The provider is actively transferring data from the upstream |
+| `success` | The last sync completed successfully |
+| `failed` | The last sync exited with an error |
+| `paused` | Stopped by operator; will not run again until restarted |
+| `disabled` | Stopped by operator; the job goroutine has been terminated |
+
+The normal execution path for a single sync run is:
+
+```text
+# Job run process
+
+PreSyncing                           Syncing                               Success
++-----------+     +----------+    +-----------+    +-------------+     +--------------+
+|  pre-job  +--+->| pre-exec +--->|  job run  +--->|  post-exec  +-+-->| post-success |
++-----------+  ^  +----------+    +-----------+    +-------------+ |   +--------------+
+               |                                                   |
+               |                +-----------------+                | Failed
+               +----------------+    post-fail    |<---------------+
+                                +-----------------+
+```
+
+`pre-syncing` corresponds to the pre-job and pre-exec phases. Once the provider is running the status transitions to `syncing`. On completion it becomes either `success` or `failed` depending on the provider's exit code.
+
+`paused` and `disabled` are set by operator commands, not by the job itself:
+- Sending `stop` sets the job to `paused`. The scheduler stops scheduling new runs, but any in-progress run is allowed to complete.
+- Sending `disable` sets the job to `disabled` and terminates the job goroutine entirely.
+
+## Hook pipeline
+
+Each job passes through a hook pipeline that allows optional pre- and post-sync actions. The hook interface (from `worker/hooks.go`) defines five stages:
+
+| Stage | When it runs |
+|---|---|
+| `preJob` | Before the scheduler starts a new run |
+| `preExec` | Just before the provider binary is executed |
+| `postExec` | Immediately after the provider exits |
+| `postSuccess` | Only on successful exit |
+| `postFail` | Only on failed exit; also used to retry from pre-exec |
+
+Built-in hook implementations include:
+
+- **exec_on_success / exec_on_failure** — Run arbitrary shell commands after a job completes. Configurable globally in `[global]` or per-mirror.
+- **cgroup** — Places the provider process in a cgroup (v1 or v2) to limit memory usage. Enabled with `[cgroup] enable = true` in the worker config.
+- **ZFS** — Creates a ZFS snapshot after a successful sync, giving users an atomic view of the mirror. Enabled with `[zfs] enable = true`.
+- **Btrfs snapshot** — Creates a Btrfs subvolume snapshot after a successful sync. Enabled with `[btrfs_snapshot] enable = true`.
+- **Docker** — Runs the provider inside a Docker container. Enabled per-mirror with `docker_image`.
+
+<Tip>
+To add post-sync commands without modifying the worker config file, use `exec_on_success_extra` and `exec_on_failure_extra` in a mirror block. These append to, rather than replace, any globally-configured hooks.
+</Tip>
+
+## Config reload without restart
+
+The worker handles `SIGHUP` by re-reading its config file and calling `ReloadMirrorConfig` with the new mirror list. Jobs that exist in both the old and new config are updated in place. New jobs are added and started. Removed jobs are stopped. No restart of the worker process is required, and any in-progress sync is not interrupted.
